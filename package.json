@@ -2,7 +2,7 @@
   "name": "dsh-workspace-gate",
   "version": "0.1.3",
   "type": "module",
-  "description": "Workspace-scoped plugin gate for DeepSeek Harness: per directory, hide a plugin's tool schemas and system-prompt sections from the model, so unrelated projects stop paying their prompt prefix.",
+  "description": "工作区插件门控：插件照常加载，按工作区（目录）把它不该占的提示词前缀摘掉——工具 schema 与提示词段不再进模型上下文，无关项目因此不必再为它们支付提示词开销。",
   "keywords": [
     "dsh",
     "dsh-plugin",
