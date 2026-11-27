@@ -60,6 +60,7 @@ window.__ModuleLoader__.load({
       clear: '清空',
       dirty: '有未保存改动',
       ok: '已保存，对新会话生效',
+      savedButInactive: '已保存，但当前策略下不会生效（清单已保留，切到「自定义」即可启用）',
       failed: '保存失败：',
       loadFailed: '读不到门控状态：',
       loading: '正在读取…',
@@ -120,6 +121,7 @@ window.__ModuleLoader__.load({
       clear: 'Clear',
       dirty: 'Unsaved changes',
       ok: 'Saved. Applies to new sessions.',
+      savedButInactive: 'Saved, but inactive under the current policy (the list is kept; switch to Custom to enable it).',
       failed: 'Save failed: ',
       loadFailed: 'Cannot read gate state: ',
       loading: 'Reading…',
@@ -331,7 +333,7 @@ window.__ModuleLoader__.load({
               ? (snapshot.global && snapshot.global.hidden) || []
               : (snapshot.workspaces && snapshot.workspaces[dir] && snapshot.workspaces[dir].hidden) || [];
           setHidden(Array.isArray(specs) ? [...specs] : []);
-          setMessage('');
+          setMessage(null);
         }, [snapshot, dir]);
 
         const hiddenSet = React.useMemo(() => new Set(hidden), [hidden]);
@@ -420,26 +422,36 @@ window.__ModuleLoader__.load({
             .then((data) => {
               if (data && data.groups) setSnapshot(data);
             })
-            .catch((cause) => setMessage(t('failed') + String(cause && cause.message ? cause.message : cause)))
+            .catch((cause) => setMessage({ text: t('failed') + String(cause && cause.message ? cause.message : cause), level: 'error' }))
             .finally(() => setBusy(false));
         };
 
         const save = () => {
           if (!dir || busy) return;
           setBusy(true);
-          setMessage('');
+          setMessage(null);
           // 全局面板必须打 /global：否则会存成一个名叫 __global__ 的假工作区，
           // 真正的 global.hidden 一个字节都写不进去。
+          const sendsHidden = mode === 'custom';
           const request =
             dir === GLOBAL_DIR
-              ? post('/global', mode === 'custom' ? { mode, hidden } : { mode })
-              : post('/apply', mode === 'custom' ? { dir, mode, hidden } : { dir, mode });
+              ? post('/global', sendsHidden ? { mode, hidden } : { mode })
+              : post('/apply', sendsHidden ? { dir, mode, hidden } : { dir, mode });
           request
             .then((data) => {
               if (data && data.groups) setSnapshot(data);
-              setMessage(t('ok'));
+              // 服务端回 effective = 实际生效条数。为 0 而这次又带了清单，
+              // 说明「存进去了但没生效」（典型：mode=all），不能报成功。
+              // 判定逻辑与 lib/client-view.mjs 的 saveFeedback() 一致（浏览器端读不到同包文件）。
+              const effective = data && data.effective;
+              const checked = sendsHidden && hidden.length > 0;
+              const inactive = typeof effective === 'number' && effective === 0 && checked;
+              setMessage({
+                text: t(inactive ? 'savedButInactive' : 'ok'),
+                level: inactive ? 'warn' : 'ok',
+              });
             })
-            .catch((cause) => setMessage(t('failed') + String(cause && cause.message ? cause.message : cause)))
+            .catch((cause) => setMessage({ text: t('failed') + String(cause && cause.message ? cause.message : cause), level: 'error' }))
             .finally(() => setBusy(false));
         };
 
@@ -447,14 +459,14 @@ window.__ModuleLoader__.load({
         const setMode = (next) => {
           if (busy) return;
           setBusy(true);
-          setMessage('');
+          setMessage(null);
           const request =
             dir === GLOBAL_DIR ? post('/global', { mode: next }) : post('/mode', { dir, mode: next });
           request
             .then((data) => {
               if (data && data.groups) setSnapshot(data);
             })
-            .catch((cause) => setMessage(t('failed') + String(cause && cause.message ? cause.message : cause)))
+            .catch((cause) => setMessage({ text: t('failed') + String(cause && cause.message ? cause.message : cause), level: 'error' }))
             .finally(() => setBusy(false));
         };
 
@@ -477,7 +489,11 @@ window.__ModuleLoader__.load({
             if ((prev.dirs || []).some((d) => d.key === key)) return prev;
             return {
               ...prev,
-              dirs: [...(prev.dirs || []), { key, path: value, title: '', source: 'manual', sessions: 0, mode: 'follow', hidden: [] }].sort(
+              // 新目录默认 custom 而不是 follow：
+              // 未配置的目录本来就会自动 follow 全局，用户手动「添加目录」的意图必然是
+              // 「我要单独配置它」。若这里给 follow，用户在面板里勾了插件再保存，
+              // save() 走的是「只切策略、不带清单」的分支，勾选全部丢失且零生效。
+              dirs: [...(prev.dirs || []), { key, path: value, title: '', source: 'manual', sessions: 0, mode: 'custom', hidden: [] }].sort(
                 (a, b) => String(a.path).localeCompare(String(b.path)),
               ),
             };
@@ -503,9 +519,13 @@ window.__ModuleLoader__.load({
         // client-view.mjs 是同一套判定的一份副本，它的 9 条单测只证明那份副本自洽。
         // 浏览器端 require 只能解析 seed 模块，读不到同包文件，所以这边只能手工同步。
         // 改这里时请人工对照 lib/client-view.mjs，并同步改那边的副本。
+        // 优先读 dirs 里的 mode：addDir 新加的目录还没落盘，workspaces 里没有它，
+        // 只读 workspaces 会把刚添加的目录误判成 follow，导致勾选被锁死。
         const mode = isGlobal
           ? ((snapshot.global && snapshot.global.mode) || 'all')
-          : ((snapshot.workspaces && snapshot.workspaces[dir] && snapshot.workspaces[dir].mode) || 'follow');
+          : (activeDir && activeDir.mode) ||
+            (snapshot.workspaces && snapshot.workspaces[dir] && snapshot.workspaces[dir].mode) ||
+            'follow';
         const globalHiddenCount = ((snapshot.global && snapshot.global.hidden) || []).length;
         // 非自定义时所有勾选置灰（保留数据，只禁用操作）
         const locked = mode !== 'custom';
@@ -1200,7 +1220,19 @@ window.__ModuleLoader__.load({
               { key: 'clear', type: 'button', style: S.ghost, disabled: busy || !dir || locked || hidden.length === 0, onClick: () => setHidden([]) },
               t('clear'),
             ),
-            message ? h('span', { key: 'm', style: { fontSize: 11, color: T.success } }, message) : null,
+            message
+              ? h(
+                  'span',
+                  {
+                    key: 'm',
+                    style: {
+                      fontSize: 11,
+                      color: message.level === 'warn' ? T.warn : message.level === 'error' ? T.error : T.success,
+                    },
+                  },
+                  message.text,
+                )
+              : null,
           ]),
         ]);
       };
