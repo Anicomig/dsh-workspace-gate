@@ -23,11 +23,16 @@ const PLUGINS = [{ patchId: 'soul-md', moduleName: 'dsh-soul-md' }];
 function makeCtx({ delayMs, failTimes = 0 }) {
   const handlers = new Map();
   const restricted = [];
+  const services = new Map();
   let listCalls = 0;
   let failuresLeft = failTimes;
 
   const ctx = {
+    provide(name, value) {
+      services.set(name, value);
+    },
     get(service) {
+      if (services.has(service)) return services.get(service);
       if (service === 'pluginManager') {
         return {
           async listPlugins() {
@@ -237,4 +242,42 @@ test('bind：工作区 all 覆盖全局 custom', async () => {
   const restricted = [];
   await harness.emit('agent/created', { agent: makeAgent('a1', 'D:\\Open', restricted) });
   assert.deepEqual(restricted, [], 'mode=all 时不应隐藏任何东西');
+});
+
+test('state：没有 global 时返回 {mode:"all",hidden:[]}', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsh-gate-'));
+  process.env.DSH_PROFILE_DIR = root;
+  mkdirSync(join(root, 'data'), { recursive: true });
+  writeFileSync(join(root, 'data', 'workspace-gate.json'), JSON.stringify({ version: 2, workspaces: {}, assignments: {} }), 'utf8');
+  const { apply } = await import('../index.js');
+  const harness = makeCtx({ delayMs: 5 });
+  apply(harness.ctx);
+  const snapshot = await harness.ctx.get('workspaceGate').state();
+  assert.deepEqual(snapshot.global, { mode: 'all', hidden: [] });
+  assert.deepEqual(snapshot.workspaces, {});
+});
+
+test('state：dirs 每项带 mode/hidden/effective', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsh-gate-'));
+  process.env.DSH_PROFILE_DIR = root;
+  mkdirSync(join(root, 'data'), { recursive: true });
+  writeFileSync(
+    join(root, 'data', 'workspace-gate.json'),
+    JSON.stringify({
+      version: 2,
+      global: { mode: 'custom', hidden: ['plugin:soul-md'] },
+      workspaces: { 'd:\\projects': { mode: 'all', hidden: ['plugin:x'] } },
+      assignments: {},
+    }),
+    'utf8',
+  );
+  const { apply } = await import('../index.js');
+  const harness = makeCtx({ delayMs: 5 });
+  apply(harness.ctx);
+  const snapshot = await harness.ctx.get('workspaceGate').state();
+  assert.deepEqual(snapshot.global, { mode: 'custom', hidden: ['plugin:soul-md'] });
+  const dir = snapshot.dirs.find((d) => d.key === 'd:/projects');
+  assert.equal(dir.mode, 'all');
+  assert.deepEqual(dir.hidden, ['plugin:x']);
+  assert.equal(dir.effective, 0, 'mode=all 实际隐藏 0 条');
 });

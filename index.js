@@ -761,10 +761,19 @@ export function apply(ctx) {
       /* 没有 workspaceRegistry 也能用：配置目录本身是键 */
     }
 
-    for (const [key, specs] of Object.entries(store.overrides)) {
-      const entry = dirs.get(key) ?? { key, path: key, title: '', source: 'manual', sessions: 0 };
-      entry.hidden = specs;
-      dirs.set(key, entry);
+    for (const [key, entry] of Object.entries(store.workspaces)) {
+      const dir = dirs.get(key) ?? { key, path: key, title: '', source: 'manual', sessions: 0 };
+      dir.mode = entry.mode;
+      dir.hidden = entry.hidden;
+      dirs.set(key, dir);
+    }
+
+    // 补齐：workspaceRegistry 里登记但还没配置的目录也要带 mode/hidden/effective
+    for (const dir of dirs.values()) {
+      if (!dir.mode) dir.mode = 'follow';
+      if (!Array.isArray(dir.hidden)) dir.hidden = [];
+      // effective = 该目录实际会隐藏多少条（UI 的「继承自全局」直接读它，不用自己算优先级）
+      dir.effective = resolvePolicy(store, dir.path).hidden.length;
     }
 
     return {
@@ -786,7 +795,8 @@ export function apply(ctx) {
         sections: plan.unassigned.sections,
       },
       dirs: [...dirs.values()].sort((a, b) => String(a.path).localeCompare(String(b.path))),
-      overrides: store.overrides,
+      global: { mode: store.global?.mode ?? 'all', hidden: store.global?.hidden ?? [] },
+      workspaces: store.workspaces,
       assignments: store.assignments,
       reserved: [...RESERVED],
       presetScopeCount: plan.presetScopeCount,
@@ -960,6 +970,15 @@ export function apply(ctx) {
       },
     }),
   );
+
+  // 把 state() 暴露给测试。**不能 `return` 它**：cordis 的 Fiber._execute() 把 apply()
+  // 的返回值当 effect 处理，普通对象会抛 "Invalid effect" 并拆除整个 fiber
+  // （agent/created 不绑定、工具消失、路由全 404，且用户看不到报错）。
+  try {
+    ctx.provide?.('workspaceGate', { state });
+  } catch {
+    /* 宿主没有 provide 能力时不影响门控本身 */
+  }
 
   void refreshPlugins(true);
 }
