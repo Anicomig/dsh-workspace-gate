@@ -16,18 +16,35 @@
 - 全局 `mode` 合法值：`'all'` | `'custom'`；工作区 `mode` 合法值：`'follow'` | `'all'` | `'custom'`
 - `emptyStore()` 返回 `{ version: 2, workspaces: {}, assignments: {} }` —— **不含 `global` 字段**（缺失即 `all`）
 - `mode` 不是 `'custom'` 时，`hidden` 必须原样保留，不得删除
-- 非法 `mode` 值一律退回默认（全局 `all`、工作区 `follow`），不抛异常
+- 非法 `mode` 值一律退回默认（全局 `all`、工作区 `follow`），**读路径和写路径都要**，不抛异常
 - 所有新增/修改的纯函数放在 `lib/policy.mjs`，不得引入 `node:fs` 或时钟
+- **`apply()` 不得返回普通对象**（cordis 会抛 `Invalid effect` 并拆除整个 fiber）
 - 测试命令：`npm test`（已配置为 `node --test "tests/*.test.mjs"`）
 - 语法检查：`npm run check`
+
+## 已确认的语义：`follow` 只跟全局，不跟父工作区
+
+用户已确认走 A 方案：
+
+> 父目录自己的会话门控正常就行，子目录的会话跟随 follow。
+
+即：
+
+```
+d:/proj      = custom（藏了 5 组）  → d:/proj 自己的会话：藏 5 组
+d:/proj/api  = follow                → d:/proj/api 的会话：套用全局，不继承父目录的 5 组
+```
+
+这是**有意设计**，不是缺陷。UI 上必须把 `follow` 标注为「跟随全局」，并在灰字提示里写明父目录清单不继承，避免用户误以为能继承。
 
 ## Review Focus
 
 1. **v1 旧文件读入**（`{version:1, overrides:{...}}`）：必须迁移成 `workspaces[dir].mode='custom'`，一条 hidden 都不能丢。
 2. **工作区 `mode='all'` 但 `hidden` 有值**：执行时不隐藏任何东西，但切回 `custom` 后那份清单必须还在。
 3. **`mode='custom'` 且 `hidden=[]`**：必须与「跟随全局」区分开——前者是显式空清单，后者套用全局。
-4. **父子目录**：父 `custom`、子 `all` 时子目录生效（取最深匹配），父目录不能压过子目录的显式选择。
+4. **父子目录**：父 `custom`、子 `all` 时子目录生效（取最深匹配）；父 `custom`、子 `follow` 时子目录**套用全局**（不继承父目录，见上节）。
 5. **没有 `global` 字段的文件**：一切放行，且 `state()` 必须返回 `{mode:'all', hidden:[]}` 而不是 `undefined`，否则 client 读 `.hidden` 会崩。
+6. **坏数据不扩大伤害**：单个字段类型错误（如 `hidden: "oops"`）只丢该条，不得让 `loadStore` 落到 `emptyStore` 丢掉全部配置。
 
 ---
 
@@ -85,6 +102,16 @@ test('normalizeStore：global 坏数据丢弃但不影响 workspaces', () => {
   assert.equal(store.global, undefined);
   assert.deepEqual(store.workspaces['d:/a'], { mode: 'all', hidden: [] });
 });
+
+test('normalizeStore：hidden 类型错误只丢该字段，不抛异常', () => {
+  // 回归测试：v1 有 Array.isArray 守卫，丢了会让 loadStore 落到 emptyStore 丢掉全部配置
+  const store = normalizeStore({
+    global: { mode: 'custom', hidden: 'oops' },
+    workspaces: { 'D:\\A': { mode: 'custom', hidden: 42 } },
+  });
+  assert.deepEqual(store.global, { mode: 'custom', hidden: [] });
+  assert.deepEqual(store.workspaces['d:/a'], { mode: 'custom', hidden: [] });
+});
 ```
 
 - [ ] **Step 2: 运行测试确认失败**
@@ -109,14 +136,18 @@ export function emptyStore() {
 ```js
 export const GLOBAL_MODES = new Set(['all', 'custom']);
 export const WORKSPACE_MODES = new Set(['follow', 'all', 'custom']);
-const specList = (value) => [...new Set((value ?? []).map((v) => String(v ?? '').trim()).filter(Boolean))].sort();
+// 数组守卫必须保留：v1 的 normalizeStore 有 `if (!Array.isArray(value)) continue`（lib/policy.mjs:233），
+// 丢掉它会让一个坏字段抛出 TypeError → loadStore 的 catch 返回 emptyStore → 用户全部配置静默消失。
+const specList = (value) => [...new Set((Array.isArray(value) ? value : []).map((v) => String(v ?? '').trim()).filter(Boolean))].sort();
 ```
 
 `normalizeStore` 解析顺序：先 `global`，再 `workspaces`，再**兼容读 v1 `overrides`**，最后 `assignments`。
 
 - `global`：不是对象就跳过；`mode` 不在 `GLOBAL_MODES` 里退回 `'all'`；`hidden` 用 `specList`。**只要 `raw.global` 是合法对象就写出 `out.global`**（即使 mode 是 all 也写，因为用户显式设过）。
 - `workspaces`：键过 `normalizeDir`；`mode` 不在 `WORKSPACE_MODES` 里退回 `'follow'`；`hidden` 用 `specList`。**条目一律保留**（即使 hidden 为空）。
-- v1 `overrides`：仅当 `raw.workspaces` 不存在时处理，每条转成 `{ mode: 'custom', hidden: specList(value) }`；空数组也保留条目。
+- v1 `overrides`：仅当 `raw.workspaces` 不存在时处理。**非数组的值（如 `'not-an-array'`）整条丢弃**（与 v1 行为一致）；数组（含空数组）转成 `{ mode: 'custom', hidden: specList(value) }`，**空数组也保留条目**——这是「显式空清单」与「没有配置」的唯一区分方式。
+
+**Step 3 与 Step 4 的判定必须一致**：`'C:\\Work': []` 产出 `c:/work: { mode: 'custom', hidden: [] }`，`'C:\\Bad': 'not-an-array'` 整条丢弃。下面 Step 4 的改写规则以此为准。
 
 - [ ] **Step 4: 运行测试确认通过**
 
@@ -125,9 +156,19 @@ Expected: PASS（含原有的 normalizeStore 用例）
 
 **原有 7 处 `.overrides` 断言必须同步改写**（`tests/policy.test.mjs` 第 170、175、178、181、184、189、227 行），否则旧断言会失败。改写规则：
 
-- `store.overrides` 里 `['tool:a','tool:b']` 这样的数组 → 变成 `store.workspaces['d:/projects'] = { mode: 'custom', hidden: ['tool:a','tool:b'] }`
-- 断言「空」的（第 181、189 行）→ `deepEqual(store.workspaces, {})`（`normalizeStore` 对空数组仍不建条目）
-- 第 227 行 `withOne.overrides` → `withOne.workspaces`，值同样包成 `{ mode: 'custom', hidden: [...] }`
+- `store.overrides` 里 `['tool:a','tool:b']` 这样的数组 → `store.workspaces['d:/projects/api'] = { mode: 'custom', hidden: ['tool:a','tool:b'] }`
+- **第 170 行那条测试**（输入含 `'C:\\Work': []` 与 `'C:\\Bad': 'not-an-array'`）的期望值：
+
+  ```js
+  assert.deepEqual(store.workspaces, {
+    'c:/work': { mode: 'custom', hidden: [] },          // 空数组 → 保留条目
+    'd:/projects/api': { mode: 'custom', hidden: ['tool:a', 'tool:b'] },
+  });                                                    // 'C:\\Bad' 与 '' 两条被丢弃
+  ```
+
+- 第 181 行（`withHidden(second, 'D:\\Projects', [])`）→ **保留**条目：`assert.deepEqual(third.workspaces['d:/projects'], { mode: 'custom', hidden: [] })`。这是「切走自定义不清空配置」的基础，不要断言成 `{}`。
+- 第 189 行（`withHidden(emptyStore(), '', [...])`，空目录键）→ `assert.deepEqual(store.workspaces, {})`（空键不建条目）
+- 第 227 行 `withOne.overrides` → `withOne.workspaces`，值包成 `{ mode: 'custom', hidden: [...] }`
 
 - [ ] **Step 5: 提交**
 
@@ -195,11 +236,35 @@ Expected: FAIL —— `withWorkspace is not a function`
 
 - [ ] **Step 3: 实现**
 
-三个函数都从 `normalizeStore(store)` 拿基线，返回新对象（不修改入参）。`withWorkspace` 的 `hidden` 用 `specList` 规整；`patch` 里没有的键不动。`withGlobal` 在 `patch` 既无 `mode` 也无 `hidden` 时 `delete next.global`。
+三个函数都从 `normalizeStore(store)` 拿基线，返回新对象（不修改入参）。`withWorkspace` 的 `hidden` 用 `specList` 规整；`patch` 里没有的键不动。
+
+**写路径必须做 mode 白名单校验**（否则非法值原样落盘）：
+
+- `withWorkspace`：`patch.mode` 存在但不在 `WORKSPACE_MODES` 里 → 忽略该字段（保持原 mode），不写入非法值
+- `withGlobal`：`patch.mode` 存在但不在 `GLOBAL_MODES` 里 → 忽略该字段
+
+**`withGlobal` 新建全局段时默认 `mode: 'custom'`**（有 `hidden` 就是有意的自定义）。若默认 `'all'`，`action='global'` + `hide:[...]` 会写成 `{mode:'all', hidden:[...]}`——`hidden` 是惰性数据，一个都藏不住，用户以为配好了其实没生效。这条必须写死。
+
+`withGlobal` 在 `patch` 既无 `mode` 也无 `hidden` 时 `delete next.global`。
 
 `withHidden` 保留导出，实现改为调用 `withWorkspace(store, dir, { mode: 'custom', hidden: specs })`。
 
 `withAssignments` 的返回对象加上 `...(base.global ? { global: { ...base.global } } : {})` 与 `workspaces: { ...base.workspaces }`。
+
+补两条测试（加在 Step 1 的用例里）：
+
+```js
+test('withWorkspace：非法 mode 被忽略，保持原值', () => {
+  const base = normalizeStore({ workspaces: { 'D:\\A': { mode: 'all', hidden: [] } } });
+  const next = withWorkspace(base, 'D:\\A', { mode: 'bogus' });
+  assert.equal(next.workspaces['d:/a'].mode, 'all');
+});
+
+test('withGlobal：只给 hidden 新建时默认 custom', () => {
+  const next = withGlobal(emptyStore(), { hidden: ['plugin:a'] });
+  assert.deepEqual(next.global, { mode: 'custom', hidden: ['plugin:a'] });
+});
+```
 
 - [ ] **Step 4: 运行确认通过**
 
@@ -379,17 +444,27 @@ Expected: FAIL —— 两条都拿到空数组（旧 `bind()` 只读 `store.over
 
 - [ ] **Step 3: 实现**
 
-`bind()` 开头替换为：
+`bind()` 开头替换为（**`agentCwd` 只调一次**，它的兜底路径要遍历 `workspaceRegistry`，不便宜）：
 
 ```js
-const policy = resolvePolicy(store, agentCwd(ctx, agent));
 const cwd = agentCwd(ctx, agent);
-if (!policy.hidden.length) return;   // 没有任何要隐藏的：不建计划，省掉 inventory
+const policy = resolvePolicy(store, cwd);
+if (!policy.hidden.length) {
+  // 命中但没有要隐藏的：仍然记一条 bound，否则这类会话从 state().recent 和 status 的
+  // recentSessions 里彻底消失，可观测性下降。
+  bound.set(agent.id, { cwd, key: policy.key, deny: [], sections: [], skipped: [], at: Date.now() });
+  return;
+}
 ```
 
-注意：`agentCwd` 只调一次，赋给 `cwd` 后再传给 `resolvePolicy`。删掉原来的 `const key = pickDir(...)` 与 `if (!key) return`。
+删掉原来的 `const key = pickDir(...)` 与 `if (!key) return`。
 
 后续 `const hidden = resolveHidden(policy.hidden, plan);` 取代 `resolveHidden(store.overrides[key] ?? [], plan)`；`bound.set(...)` 里的 `key` 用 `policy.key`；「一条都没命中」告警里的 `specs` 用 `policy.hidden`。
+
+**告警文案按 `policy.source` 分措辞**（`source='global'` 时 `policy.key` 是空串，直接套原文案会显示成「工作区  配了 3 条隐藏」）：
+
+- `source === 'workspace'` → `工作区 ${policy.key} 配了 ${n} 条隐藏……`
+- `source === 'global'` → `全局策略配了 ${n} 条隐藏……`
 
 `import` 行加上 `resolvePolicy`。
 
@@ -428,14 +503,23 @@ test('state：没有 global 时返回 {mode:"all",hidden:[]}', async () => {
   writeFileSync(join(root, 'data', 'workspace-gate.json'), JSON.stringify({ version: 2, workspaces: {}, assignments: {} }), 'utf8');
   const { apply } = await import('../index.js');
   const harness = makeCtx({ delayMs: 5 });
-  const api = apply(harness.ctx);
-  const snapshot = await api.state();
+  apply(harness.ctx);
+  const snapshot = await harness.ctx.get('workspaceGate').state();
   assert.deepEqual(snapshot.global, { mode: 'all', hidden: [] });
   assert.deepEqual(snapshot.workspaces, {});
 });
 ```
 
-> 注意：`apply()` 当前**不返回任何值**（`index.js` 末尾是 `void refreshPlugins(true);` 后直接 `}`）。Step 3 要在末尾补 `return { state };`——测试需要这个出口。Cordis 不读取 `apply` 的返回值，所以对生产行为无影响。
+> **`apply()` 绝对不能返回普通对象。** cordis 的 `Fiber._execute()`（`@deepseek-ai/cordis/lib/index.js:429-461`）把返回值当 effect 处理：函数→collect、`null`/`undefined`→OK、thenable→OK、可迭代→OK，**普通对象走 `else throw new TypeError("Invalid effect")`**。
+>
+> 实测（cordis 4.1.0，本机）：
+> ```
+> A-no-return:      errors=0  listenerFired=true   disposed=false
+> B-return-object:  errors=1  Invalid effect  listenerFired=false  disposed=true
+> ```
+> `disposed=true` 表示已注册的 `ctx.effect` 清理函数当场被执行，整个 fiber 被拆除：`agent/created` 不绑定、`workspace_gate` 工具消失、`/workspace-gate/*` 路由全 404，且**用户看不到任何报错**。
+>
+> **正确做法**：`apply()` 末尾用 `ctx.provide('workspaceGate', { state })` 暴露给测试，**不写 `return`**。测试里 `harness.ctx.get('workspaceGate').state()`。
 
 - [ ] **Step 2: 运行确认失败**
 
@@ -453,7 +537,25 @@ global: { mode: store.global?.mode ?? 'all', hidden: store.global?.hidden ?? [] 
 workspaces: store.workspaces,
 ```
 
-`apply()` 末尾加 `return { state };`（保持原有 `void refreshPlugins(true)` 不变）。
+**每个 dir 还要附一个 `effective` 字段**（设计文档要求 `bind()` 与 `state()` 共用 `resolvePolicy`，避免客户端重新实现优先级）：
+
+```js
+effective: resolvePolicy(store, entry.path).hidden.length,   // 该目录实际会隐藏多少条
+```
+
+这样 UI 的「继承自全局：已关 N 组」直接读 `effective`，不用自己算。
+
+`apply()` 末尾（`void refreshPlugins(true);` 之后）加一行 `ctx.provide('workspaceGate', { state });`——**不要写 `return`**（理由见上面 Step 1 的警告）。
+
+测试改成通过 `ctx.get` 取：
+
+```js
+const harness = makeCtx({ delayMs: 5 });
+apply(harness.ctx);
+const snapshot = await harness.ctx.get('workspaceGate').state();
+```
+
+`makeCtx` 需要补一个 `provide(name, value)` 方法与对应的 `get(name)` 查找（现有 `get` 已按 service 名返回，加一个 `services` 映射即可）。
 
 - [ ] **Step 4: 运行确认通过**
 
@@ -491,7 +593,13 @@ if (tail === 'apply') {
   const dir = String(body?.dir ?? '').trim();
   if (!dir) return json(res, 400, { error: 'dir 不能为空' });
   const patch = {};
-  if (typeof body?.mode === 'string') patch.mode = body.mode;
+  if (body?.mode !== undefined) {
+    // 写路径也要校验：非法值落盘会让客户端三个 radio 全不选中，UI 进入无法恢复的状态
+    if (!WORKSPACE_MODES.has(String(body.mode))) {
+      return json(res, 400, { error: `mode 必须是 ${[...WORKSPACE_MODES].join(' / ')}` });
+    }
+    patch.mode = body.mode;
+  }
   if (Array.isArray(body?.hidden)) patch.hidden = body.hidden;
   store = withWorkspace(store, dir, patch);
   saveStore(store);
@@ -501,24 +609,40 @@ if (tail === 'apply') {
 
 - [ ] **Step 2: 新增 `/mode` 与 `/global`**
 
-放在 `/apply` 之后。`/mode` 只接受 `follow|all|custom`，非法值返回 400。`/global` 在 `mode` 与 `hidden` 都没传时表示删除全局段。
+放在 `/apply` 之后。`/mode` 只接受 `follow|all|custom`，非法值返回 400。`/global` 的 `mode` 只接受 `all|custom`，非法值返回 400；`mode` 与 `hidden` 都没传时表示删除全局段。
 
-- [ ] **Step 3: 工具动作**
+- [ ] **Step 3: 改写三处残留的 `store.overrides`（v2 下必崩）**
 
-`enum` 加 `'mode'`、`'global'`；`properties` 加 `mode`（string）与 `hide`/`show` 已存在可复用给全局 hidden。实现里 `action === 'mode'` 调 `withWorkspace`，`action === 'global'` 调 `withGlobal`。
+`index.js` 里有三处仍在读 v1 字段，Task 5 把 `overrides` 从 `state()` 删掉后它们会抛 `TypeError`：
 
-- [ ] **Step 4: 验证**
+```js
+// index.js:932  action='set'
+const current = new Set(store.workspaces[key]?.hidden ?? []);
+store = withWorkspace(store, key, { hidden: [...current] });   // 注意：不要用 withHidden，它会强制 mode='custom'
+// index.js:937
+return safeJson({ ok: true, dir: key, mode: store.workspaces[key]?.mode ?? 'follow', hidden: store.workspaces[key]?.hidden ?? [] });
+// index.js:944  action='status'
+configuredDirs: Object.keys(snapshot.workspaces ?? {}),
+```
 
-Run: `npm run check`
-Expected: 无语法错误
+**`action='set'` 的语义写死：只改 `hidden`，不动 `mode`。** 旧 `withHidden` 是「写清单 = 隐式自定义」，但 v2 里 `mode` 是唯一决定行为的字段，`mode='all'` 的工作区被 `action='set'` 悄悄翻成 `custom` 会很反直觉。要改 mode 用 `action='mode'`。
 
-手动验证（在最终装进 profile 后做）：切换 mode 后 `GET /workspace-gate/state` 里对应条目的 `mode` 变化，且 `hidden` 未被清空。
+`action='diagnose'`（`index.js:906`）的 `overrides: store.overrides` 也要改成 `workspaces: store.workspaces`。
 
-- [ ] **Step 5: 提交**
+- [ ] **Step 4: 工具动作**
+
+`enum` 加 `'mode'`、`'global'`；`properties` 加 `mode`（string）与 `hide`/`show`（复用给全局 hidden）。实现里 `action === 'mode'` 调 `withWorkspace`，`action === 'global'` 调 `withGlobal`，两者都对 `mode` 做白名单校验。
+
+- [ ] **Step 5: 验证**
+
+Run: `npm run check && npm test`
+Expected: 无语法错误，测试全绿
+
+- [ ] **Step 6: 提交**
 
 ```bash
 git add index.js
-git commit -m "feat: 新增 /mode 与 /global 路由，/apply 支持 mode"
+git commit -m "feat: 新增 /mode 与 /global 路由，/apply 校验 mode，改写残留的 overrides 消费者"
 ```
 
 ---
@@ -535,13 +659,28 @@ git commit -m "feat: 新增 /mode 与 /global 路由，/apply 支持 mode"
 
 - [ ] **Step 1: 加文案**
 
-`zh` 与 `en` 各加：`globalConfig`（全局配置 / Global）、`policy`（策略 / Policy）、`modeFollow`（跟随全局 / Follow global）、`modeAll`（全部启用 / All enabled）、`modeCustom`（自定义 / Custom）、`inherited`（继承自全局：已关 N 组 / Inherited from global: N groups off）、`modeHint`（切换策略不会清空已保存的勾选 / Switching policy keeps your saved selections）
+`zh` 与 `en` 各加：`globalConfig`（全局配置 / Global）、`policy`（策略 / Policy）、`modeFollow`（跟随全局 / Follow global）、`modeAll`（全部启用 / All enabled）、`modeCustom`（自定义 / Custom）、`modeHint`（切换策略不会清空已保存的勾选 / Switching policy keeps your saved selections）。
 
-- [ ] **Step 2: 全局 chip**
+**`inherited` 必须是函数**（`t()` 只在 `typeof value === 'function'` 时插参，见 `client.js:1057`；静态字符串里的 `N` 永远不会被替换）：
+
+```js
+inherited: (n) => `继承自全局：已关 ${n} 组`,
+// en: inherited: (n) => `Inherited from global: ${n} groups off`,
+```
+
+- [ ] **Step 2: 全局 chip + 修三处 `snapshot.overrides`**
 
 `dirChips` 数组前插一个：`label = t('globalConfig')`，`selected = dir === '__global__'`，`onClick: () => setDir('__global__')`。
 
-`useEffect`（`client.js:307`）改为：`dir === '__global__'` 时 `setHidden(snapshot.global?.hidden ?? [])`，否则读 `snapshot.workspaces?.[dir]?.hidden ?? []`。
+`client.js` 里三处读 `snapshot.overrides` 的地方都要改（Task 5 已把它从 `state()` 删除）：
+
+| 行 | 现在 | 改为 |
+|---|---|---|
+| 302 | `Object.keys(snapshot.overrides \|\| {})` | `Object.keys(snapshot.workspaces \|\| {})`（否则「优先选中已配置目录」静默丢失） |
+| 309 | `(snapshot.overrides \|\| {})[dir]` | `dir === '__global__' ? (snapshot.global?.hidden ?? []) : (snapshot.workspaces?.[dir]?.hidden ?? [])` |
+| 331 | `savedJson` 读 `snapshot.overrides[dir]` | `dir === '__global__' ? snapshot.global?.hidden : snapshot.workspaces?.[dir]?.hidden` |
+
+**第 331 行不改的后果**：`savedJson` 恒为 `'[]'` → `dirty` 恒等于 `hidden.length > 0` → 用户点「清空」后 `dirty=false` → 保存按钮 `disabled: busy || !dir || !dirty`（`client.js:1016`）**永远禁用**，用户再也无法清空已存清单。
 
 初始选中逻辑（`client.js:300-305`）保持选第一个真实目录，不要默认选中全局。
 
@@ -559,18 +698,42 @@ git commit -m "feat: 新增 /mode 与 /global 路由，/apply 支持 mode"
 
 策略行下方加只读灰字：工作区 mode 为 `follow` 且全局 `hidden` 非空时，显示 `t('inherited', 全局隐藏的组数)`。
 
-- [ ] **Step 5: 保存逻辑**
+- [ ] **Step 5: 保存逻辑（必须按全局面板分流）**
 
-`save()` 改为 `post('/apply', { dir, mode, hidden })`；`mode !== 'custom'` 时只发 `{ dir, mode }`，不带 `hidden`（保护已存清单）。
+**这是最容易漏的一处**：全局 hidden 若不改打 `/global`，会存成一个名叫 `__global__` 的假工作区，真正的 `global.hidden` 一个字节都写不进去——全局的「隐藏哪几个插件」这一半功能在 UI 上完全无法配置。
 
-- [ ] **Step 6: 验证**
+```js
+const save = () => {
+  if (busy) return;
+  setBusy(true);
+  setMessage('');
+  const request = dir === '__global__'
+    ? post('/global', mode === 'custom' ? { mode, hidden } : { mode })
+    : post('/apply', mode === 'custom' ? { dir, mode, hidden } : { dir, mode });
+  request
+    .then((data) => {
+      if (data && data.groups) setSnapshot(data);
+      setMessage(t('ok'));
+    })
+    .catch((cause) => setMessage(t('failed') + String(cause && cause.message ? cause.message : cause)))
+    .finally(() => setBusy(false));
+};
+```
+
+`mode !== 'custom'` 时不带 `hidden`，保护已存清单。
+
+- [ ] **Step 6: 状态行按三态显示**
+
+`client.js:977` 现在是 `hasOwnOverride ? '· 有单独配置' : '· 跟随全局'`，语义过期——`mode='all'` 的工作区会被显示成「跟随全局」。改成按 `mode` 三分支：`跟随全局` / `全部启用` / `自定义 N 组`。
+
+- [ ] **Step 7: 验证**
 
 Run: `npm run check`
 Expected: 无语法错误
 
-浏览器手测（装进 profile 后）：① 切到全部启用，勾选变灰；② 切回自定义，原来的勾选还在；③ 点全局配置，只有两个选项；④ 工作区选跟随全局时显示继承提示。
+浏览器手测（装进 profile 后）：① 切到全部启用，勾选变灰；② 切回自定义，原来的勾选还在；③ 点全局配置，只有两个选项；④ **在全局勾选一组 → 保存 → 重新读取，`global.hidden` 确实有值**；⑤ 工作区选跟随全局时显示继承提示；⑥ 清空一个工作区的勾选后能保存成功。
 
-- [ ] **Step 7: 提交**
+- [ ] **Step 8: 提交**
 
 ```bash
 git add client.js
@@ -589,6 +752,20 @@ git commit -m "feat(ui): 新增全局配置入口与三态策略选择，非自�
 
 在 README 里加「策略（mode）」小节：解释全局 `all/custom` 与工作区 `follow/all/custom`、执行优先级、以及「切换策略不清空已保存的勾选」。
 
+**同时更新存储结构示例**：`README.md:225-235` 与 `README.en.md:245` 现在还是 `"version": 1` + `"overrides": {...}`，必须换成 v2 结构：
+
+```json
+{
+  "version": 2,
+  "global": { "mode": "custom", "hidden": ["plugin:mnemosyne"] },
+  "workspaces": {
+    "d:/projects": { "mode": "custom", "hidden": ["plugin:soul-md"] },
+    "d:/open": { "mode": "all" }
+  },
+  "assignments": { "tool:read": "DSH 文件读写与检索" }
+}
+```
+
 - [ ] **Step 2: 提交**
 
 ```bash
@@ -604,5 +781,12 @@ git commit -m "docs: 说明工作区策略（mode）的三种状态与优先级"
 
 1. `npm run check && npm test` 必须全绿
 2. 用 `git log --oneline main..HEAD` 核对提交粒度
-3. 整体 diff 复核：确认没有把 `overrides` 残留写回磁盘
+3. 整体 diff 复核：确认没有把 `overrides` 残留写回磁盘（`grep -rn 'store\.overrides\|snapshot\.overrides' index.js client.js` 应为空）
 4. 装进 `web` profile 做一次真实手测（`dsh plugin --profile web add link:<worktree>` 或复制），验证优先级矩阵在真实会话里成立
+
+## 明确不在本次范围（可跳过）
+
+| 项 | 原因 |
+|---|---|
+| **E16 客户端 `addDir` 归一化不一致** | `client.js:423` 用 `replace(/\\/g,'/').replace(/\/+$/,'').toLowerCase()`，不折叠重复分隔符；服务端 `normalizeDir` 会折叠 `//`。用户输入 `D:\Projects//api` 时 UI 会显示「配置丢了」。**边界情况，修复需要改 `addDir` 的归一化逻辑并处理 key 回写，改动面比收益大。** 若实现时顺手能改就改，改不动就留注释。 |
+| **E19 沙箱测试参数** | 经实测，本会话（`danger-full-access`）直接 `npm test` 28 项全过，不需要 `--test-isolation=none`。审查者当时在 `workspace-write` 沙箱才需要。若执行时遇到 `spawn EPERM`，再加 `--test-isolation=none` 并把 `TEMP` 指到工作区内。 |
