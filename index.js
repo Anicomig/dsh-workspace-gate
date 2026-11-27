@@ -26,13 +26,17 @@ import {
   applyAssignments,
   attribute,
   emptyStore,
+  GLOBAL_MODES,
   normalizeDir,
   normalizeStore,
   pickDir,
   resolveHidden,
   resolvePolicy,
+  WORKSPACE_MODES,
   withAssignments,
+  withGlobal,
   withHidden,
+  withWorkspace,
 } from './lib/policy.mjs';
 
 export const name = 'workspace-gate';
@@ -820,7 +824,47 @@ export function apply(ctx) {
         const body = JSON.parse((await readBody(req)) || '{}');
         const dir = String(body?.dir ?? '').trim();
         if (!dir) return json(res, 400, { error: 'dir 不能为空' });
-        store = withHidden(store, dir, Array.isArray(body?.hidden) ? body.hidden : []);
+        const patch = {};
+        if (body?.mode !== undefined) {
+          // 写路径也要校验：非法值落盘会让客户端三个 radio 全不选中，UI 进入无法恢复的状态
+          if (!WORKSPACE_MODES.has(String(body.mode))) {
+            return json(res, 400, { error: `mode 必须是 ${[...WORKSPACE_MODES].join(' / ')}` });
+          }
+          patch.mode = body.mode;
+        }
+        if (Array.isArray(body?.hidden)) patch.hidden = body.hidden;
+        store = withWorkspace(store, dir, patch);
+        saveStore(store);
+        return json(res, 200, { ok: true, ...(await state(false)) });
+      }
+
+      if (tail === 'mode') {
+        if (req.method !== 'POST') return json(res, 405, { error: 'method_not_allowed' });
+        const body = JSON.parse((await readBody(req)) || '{}');
+        const dir = String(body?.dir ?? '').trim();
+        if (!dir) return json(res, 400, { error: 'dir 不能为空' });
+        const mode = String(body?.mode ?? '').trim();
+        if (!WORKSPACE_MODES.has(mode)) {
+          return json(res, 400, { error: `mode 必须是 ${[...WORKSPACE_MODES].join(' / ')}` });
+        }
+        store = withWorkspace(store, dir, { mode });
+        saveStore(store);
+        return json(res, 200, { ok: true, ...(await state(false)) });
+      }
+
+      if (tail === 'global') {
+        if (req.method !== 'POST') return json(res, 405, { error: 'method_not_allowed' });
+        const body = JSON.parse((await readBody(req)) || '{}');
+        const patch = {};
+        if (body?.mode !== undefined) {
+          if (!GLOBAL_MODES.has(String(body.mode))) {
+            return json(res, 400, { error: `mode 必须是 ${[...GLOBAL_MODES].join(' / ')}` });
+          }
+          patch.mode = body.mode;
+        }
+        if (Array.isArray(body?.hidden)) patch.hidden = body.hidden;
+        // 空 patch = 删除全局段（回到「全部启用」）
+        store = withGlobal(store, patch);
         saveStore(store);
         return json(res, 200, { ok: true, ...(await state(false)) });
       }
@@ -868,12 +912,19 @@ export function apply(ctx) {
         properties: {
           action: {
             type: 'string',
-            enum: ['status', 'list', 'set', 'diagnose'],
+            enum: ['status', 'list', 'set', 'mode', 'global', 'diagnose'],
             description: '要做什么。',
           },
           dir: {
             type: 'string',
-            description: 'action=set 时必填：要改配置的目录（绝对路径，子目录会继承）。',
+            description: 'action=set / mode 时必填：要改配置的目录（绝对路径，子目录会继承）。',
+          },
+          mode: {
+            type: 'string',
+            enum: ['follow', 'all', 'custom'],
+            description:
+              'action=mode 时必填：follow=跟随全局，all=全部启用，custom=用本目录的隐藏清单。' +
+              'action=global 时只接受 all / custom。',
           },
           hide: {
             type: 'array',
@@ -922,7 +973,8 @@ export function apply(ctx) {
             pluginKeys: first && typeof first === 'object' ? Object.keys(first) : [],
             pluginSample: pluginRefs().slice(0, 8),
             storePath: storeFile(),
-            overrides: store.overrides,
+            global: store.global ?? null,
+            workspaces: store.workspaces,
             bound: [...bound.entries()].map(([id, info]) => ({ sessionId: id, ...info })),
           });
         }
@@ -948,19 +1000,65 @@ export function apply(ctx) {
           const dir = String(args?.dir ?? '').trim();
           if (!dir) return safeJson({ ok: false, error: 'action=set 需要 dir' });
           const key = normalizeDir(dir);
-          const current = new Set(store.overrides[key] ?? []);
+          // action=set 只改 hidden、不动 mode：v2 里 mode 是唯一决定行为的字段，
+          // 悄悄把 mode=all 的工作区翻成 custom 会很反直觉。改 mode 请用 action=mode。
+          const current = new Set(store.workspaces[key]?.hidden ?? []);
           for (const s of args?.hide ?? []) current.add(String(s).trim());
           for (const s of args?.show ?? []) current.delete(String(s).trim());
-          store = withHidden(store, key, [...current]);
+          store = withWorkspace(store, key, { hidden: [...current] });
           saveStore(store);
-          return safeJson({ ok: true, dir: key, hidden: store.overrides[key] ?? [] });
+          return safeJson({
+            ok: true,
+            dir: key,
+            mode: store.workspaces[key]?.mode ?? 'follow',
+            hidden: store.workspaces[key]?.hidden ?? [],
+          });
+        }
+
+        if (action === 'mode') {
+          const dir = String(args?.dir ?? '').trim();
+          if (!dir) return safeJson({ ok: false, error: 'action=mode 需要 dir' });
+          const mode = String(args?.mode ?? '').trim();
+          if (!WORKSPACE_MODES.has(mode)) {
+            return safeJson({ ok: false, error: `mode 必须是 ${[...WORKSPACE_MODES].join(' / ')}` });
+          }
+          const key = normalizeDir(dir);
+          store = withWorkspace(store, key, { mode });
+          saveStore(store);
+          return safeJson({ ok: true, dir: key, mode });
+        }
+
+        if (action === 'global') {
+          const patch = {};
+          if (args?.mode !== undefined) {
+            const mode = String(args.mode).trim();
+            if (!GLOBAL_MODES.has(mode)) {
+              return safeJson({ ok: false, error: `mode 必须是 ${[...GLOBAL_MODES].join(' / ')}` });
+            }
+            patch.mode = mode;
+          }
+          // hide/show 复用给全局 hidden
+          const prev = new Set(store.global?.hidden ?? []);
+          let touched = false;
+          for (const s of args?.hide ?? []) {
+            prev.add(String(s).trim());
+            touched = true;
+          }
+          for (const s of args?.show ?? []) {
+            prev.delete(String(s).trim());
+            touched = true;
+          }
+          if (touched) patch.hidden = [...prev];
+          store = withGlobal(store, patch);
+          saveStore(store);
+          return safeJson({ ok: true, global: store.global ?? null });
         }
 
         const snapshot = await state(false);
         return safeJson({
           storePath: snapshot.storePath,
           storeExists: snapshot.storeExists,
-          configuredDirs: Object.keys(snapshot.overrides),
+          configuredDirs: Object.keys(snapshot.workspaces ?? {}),
           presetScopeCount: snapshot.presetScopeCount,
           recentSessions: snapshot.recent,
           note: snapshot.recent.length
@@ -975,7 +1073,7 @@ export function apply(ctx) {
   // 的返回值当 effect 处理，普通对象会抛 "Invalid effect" 并拆除整个 fiber
   // （agent/created 不绑定、工具消失、路由全 404，且用户看不到报错）。
   try {
-    ctx.provide?.('workspaceGate', { state });
+    ctx.provide?.('workspaceGate', { state, handle });
   } catch {
     /* 宿主没有 provide 能力时不影响门控本身 */
   }
