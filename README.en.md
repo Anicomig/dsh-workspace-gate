@@ -79,7 +79,7 @@ switches, restarting, or reloading plugins.
   user"; the third-party group is expanded by default, official groups collapsed.
 - **Correctable ownership**: every tool/section has an ownership dropdown, so unassigned items can
   be merged into an existing group or a brand-new one.
-- **Model-callable**: the `workspace_gate` tool supports `status` / `list` / `set`.
+- **Model-callable**: the `workspace_gate` tool supports `status` / `list` / `set` / `mode` / `global` / `diagnose`.
 - **Low noise**: no DOM writes, no host client packages imported, colors only via
   `--dsw-alias-*` theme tokens.
 - **Testable**: the core logic lives in `lib/policy.mjs` with 24 unit tests that run without DSH.
@@ -202,10 +202,29 @@ Save. Applies to **new sessions**.
 workspace_gate(action:"status")                          # which sessions hit which directory, what was hidden
 workspace_gate(action:"list")                            # gateable plugins → tool/section names
 workspace_gate(action:"set", dir:"D:\\Projects\\api",
-                hide:["plugin:r18-novel"])               # dir is required here
+                hide:["plugin:r18-novel"])               # changes the list only, not the policy
 workspace_gate(action:"set", dir:"D:\\Projects",
                 show:["tool:read"])                      # remove from the hidden list
+workspace_gate(action:"mode", dir:"D:\\Projects\\api",
+               mode:"custom")                            # change policy: follow / all / custom
+workspace_gate(action:"global")                          # read the global policy (no args = read-only)
+workspace_gate(action:"global", mode:"custom",
+               hide:["plugin:r18-novel"])                # set the global policy
+workspace_gate(action:"global", clear:true)              # delete the global section (explicit)
 ```
+
+> **`set` and `mode` are not the same thing.** In v2 `mode` is the only field that decides
+> behavior; `hidden` is just data:
+>
+> - On a directory that **already exists**, `action:"set"` **changes the list and leaves `mode`
+>   alone**. On a directory whose mode is `all`, the list is written but **nothing is hidden** —
+>   the `effective` count in the response says how many actually apply; a 0 means no effect.
+> - On a **never-configured directory**, `set` defaults `mode` to `custom` (otherwise the list you
+>   wrote would never take effect).
+> - To make an existing directory's list take effect, use `action:"mode"` to switch to `custom`.
+>
+> Likewise `action:"global"` with no arguments is **read-only** (it never deletes); removing the
+> global section requires an explicit `clear:true`.
 
 > The tool does not use `deferLoading`: measured, that made it **invisible to sub-sessions**, so
 > the model could never call it. Paying ~300 tokens of schema is the cheaper mistake.
@@ -241,9 +260,11 @@ until you classify them by hand.
 
 ```json
 {
-  "version": 1,
-  "overrides": {
-    "d:/projects/api": ["plugin:r18-novel", "tool:free_search_news"]
+  "version": 2,
+  "global": { "mode": "custom", "hidden": ["plugin:mnemon"] },
+  "workspaces": {
+    "d:/projects/api": { "mode": "custom", "hidden": ["plugin:r18-novel", "tool:free_search_news"] },
+    "d:/open": { "mode": "all" }
   },
   "assignments": {
     "tool:read": "file tools"
@@ -251,12 +272,39 @@ until you classify them by hand.
 }
 ```
 
-- `overrides` — the **per-workspace** hidden list; keys are normalized directories (lowercase,
+- `global` — the **global policy**. Absent means everything visible; `mode` is `all` or `custom`;
+- `workspaces` — the **per-workspace** policy; keys are normalized directories (lowercase,
   `/`-separated) and subdirectories inherit the nearest ancestor;
 - `assignments` — **global** manual ownership; it beats inference and only changes grouping, not
   visibility;
 - a corrupt or unreadable file degrades to an empty configuration (everything visible) — the gate
-  never breaks a session.
+  never breaks a session. A single malformed field drops only that entry, not the rest.
+
+### Policy (mode)
+
+Each workspace is in one of three states:
+
+| State | Meaning |
+|---|---|
+| `follow` | use the global policy. **It follows the global listing only — a parent workspace's list is not inherited** |
+| `all` | hide nothing in this directory |
+| `custom` | use this directory's own `hidden` list |
+
+Resolution order (longest ancestor prefix wins):
+
+```
+workspace custom  >  workspace all  >  global custom  >  everything visible
+```
+
+**Switching policy never clears your saved selections.** `mode` is the only field that decides
+behavior; `hidden` is just data. Setting `mode` to `all` keeps the list on disk, and switching back
+to `custom` brings it into effect again. The checkboxes grey out while the mode is not `custom`,
+but nothing is lost.
+
+### Upgrading from v1
+
+An old file's `overrides` are read as `workspaces[dir] = { mode: "custom", hidden: [...] }` and
+written back as v2 on the next save. **No manual migration, and no configuration is lost.**
 
 ## Why not really disable plugins
 

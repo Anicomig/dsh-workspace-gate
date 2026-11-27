@@ -71,7 +71,7 @@ DSH 自带的插件管理只有 **全局** 开关：一个插件要么对所有�
 - **按来源分档**：靠 bundle 的 `availability` 判断"随 dsh 安装"还是"用户自装"，
   第三方档默认展开，官方档默认收起。
 - **归属可手工矫正**：每个工具/段右侧有归属下拉，可以把未归属的项并入已有分组或新建分组。
-- **模型可调**：`workspace_gate` 工具支持 `status` / `list` / `set`。
+- **模型可调**：`workspace_gate` 工具支持 `status` / `list` / `set` / `mode` / `global` / `diagnose`。
 - **可控的噪声**：不写 DOM、不加载宿主客户端包、颜色只用 `--dsw-alias-*` 主题 token。
 - **可测试**：核心逻辑抽在 `lib/policy.mjs`，24 条单测，不启动 DSH 也能跑。
 
@@ -187,10 +187,25 @@ dsh plugin --profile <your-profile> add dsh-workspace-gate@0.1.1
 workspace_gate(action:"status")                          # 最近哪些会话命中了哪个目录、摘掉了什么
 workspace_gate(action:"list")                            # 可门控的插件 → 工具名/段名
 workspace_gate(action:"set", dir:"D:\\Projects\\api",
-                hide:["plugin:r18-novel"])               # 需要显式给 dir
+                hide:["plugin:r18-novel"])               # 只改隐藏清单，不动策略
 workspace_gate(action:"set", dir:"D:\\Projects",
                 show:["tool:read"])                      # 从隐藏清单移除
+workspace_gate(action:"mode", dir:"D:\\Projects\\api",
+               mode:"custom")                            # 改策略：follow / all / custom
+workspace_gate(action:"global")                          # 读全局策略（不传参数 = 只读）
+workspace_gate(action:"global", mode:"custom",
+               hide:["plugin:r18-novel"])                # 设置全局策略
+workspace_gate(action:"global", clear:true)              # 删除全局段（必须显式 clear）
 ```
+
+> **`set` 与 `mode` 必须分清。** v2 里 `mode` 是唯一决定行为的字段，`hidden` 只是数据：
+>
+> - 对**已存在的目录**，`action:"set"` **只改清单、不动 mode**。对一个 `mode:"all"` 的目录
+>   `set` 后，清单写进去了但**一条都不生效**——返回里的 `effective` 就是生效条数，看到 0 就说明没起作用。
+> - 对**从未配置过的目录**，`set` 会把 `mode` 默认落成 `custom`（否则写进去的清单永不生效）。
+> - 要让一个已有目录的清单生效，用 `action:"mode"` 改成 `custom`。
+>
+> 同理，`action:"global"` 不传任何参数**只读**（不会删配置）；删除必须显式 `clear:true`。
 
 > 这个工具没有用 `deferLoading`：实测打开后子会话里它**直接不可见**，模型想调也调不到。
 
@@ -224,9 +239,11 @@ DSH 运行时**不记录**某个工具是哪个插件注册的（`tools.register
 
 ```json
 {
-  "version": 1,
-  "overrides": {
-    "d:/projects/api": ["plugin:r18-novel", "tool:free_search_news"]
+  "version": 2,
+  "global": { "mode": "custom", "hidden": ["plugin:mnemon"] },
+  "workspaces": {
+    "d:/projects/api": { "mode": "custom", "hidden": ["plugin:r18-novel", "tool:free_search_news"] },
+    "d:/open": { "mode": "all" }
   },
   "assignments": {
     "tool:read": "文件工具"
@@ -234,9 +251,36 @@ DSH 运行时**不记录**某个工具是哪个插件注册的（`tools.register
 }
 ```
 
-- `overrides`：**按工作区**的隐藏清单，键是归一化目录（小写 + `/`），子目录继承最近祖先；
+- `global`：**全局策略**。缺这个字段 = 全部启用；`mode` 取 `all` / `custom`；
+- `workspaces`：**按工作区**的策略，键是归一化目录（小写 + `/`），子目录继承最近祖先；
 - `assignments`：**全局**的手工归属，赢过自动推断，只改分组、不影响"要不要隐藏"；
 - 文件损坏 / 读不到 → 退化为空配置（全放行），不会让门控把会话搞挂。
+  单个字段类型错误只丢那一条，不会连累其他配置。
+
+### 策略（mode）
+
+每个工作区有三种状态，决定这个目录到底隐藏什么：
+
+| 状态 | 含义 |
+|---|---|
+| `follow`（跟随全局） | 套用全局策略。**只跟全局，不继承父工作区的清单** |
+| `all`（全部启用） | 这个目录什么都不隐藏 |
+| `custom`（自定义） | 用它自己的 `hidden` 清单 |
+
+**执行优先级**（取最长祖先前缀，命中最深的那个说话）：
+
+```
+工作区 custom  >  工作区 all  >  全局 custom  >  全部放行
+```
+
+**切换策略不会清空已保存的勾选。** `mode` 是唯一决定行为的字段，`hidden` 只是数据：
+把 `mode` 改成 `all` 时清单原样留在文件里，切回 `custom` 就能继续用。
+界面上这时勾选框会置灰，但数据没丢。
+
+### 从 v1 升级
+
+旧文件的 `overrides` 会被自动读成 `workspaces[dir] = { mode: "custom", hidden: [...] }`，
+下次任意保存就写成 v2。**不需要手工迁移，配置不会丢。**
 
 ## 为什么不是"真·停用插件"
 

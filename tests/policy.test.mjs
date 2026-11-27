@@ -10,11 +10,15 @@ import {
   normalizeDir,
   normalizeStore,
   pickDir,
+  resolvePolicy,
   resolveHidden,
   sectionOwner,
   tokensOf,
+  clearGlobal,
   withAssignments,
+  withGlobal,
   withHidden,
+  withWorkspace,
 } from '../lib/policy.mjs';
 
 test('normalizeDir 统一分隔符、去尾斜杠、转小写', () => {
@@ -166,27 +170,32 @@ test('normalizeStore：逐条清洗、去重、排序、归一化键', () => {
       'C:\\Bad': 'not-an-array',
     },
   });
-  assert.equal(store.version, 1);
-  assert.deepEqual(store.overrides, { 'd:/projects/api': ['tool:a', 'tool:b'] });
+  assert.equal(store.version, 2);
+  // 空数组 → 保留条目；'C:\Bad'（非数组）与 ''（空键）两条被丢弃
+  assert.deepEqual(store.workspaces, {
+    'c:/work': { mode: 'custom', hidden: [] },
+    'd:/projects/api': { mode: 'custom', hidden: ['tool:a', 'tool:b'] },
+  });
 });
 
 test('withHidden：写入、覆盖、清空', () => {
   const first = withHidden(emptyStore(), 'D:\\Projects', ['tool:a']);
-  assert.deepEqual(first.overrides, { 'd:/projects': ['tool:a'] });
+  assert.deepEqual(first.workspaces, { 'd:/projects': { mode: 'custom', hidden: ['tool:a'] } });
 
   const second = withHidden(first, 'd:/projects', ['tool:b', 'tool:a']);
-  assert.deepEqual(second.overrides, { 'd:/projects': ['tool:a', 'tool:b'] });
+  assert.deepEqual(second.workspaces, { 'd:/projects': { mode: 'custom', hidden: ['tool:a', 'tool:b'] } });
 
+  // 空数组保留条目（mode=custom + hidden=[]）——这是「切走自定义不清空配置」的基础
   const third = withHidden(second, 'D:\\Projects', []);
-  assert.deepEqual(third.overrides, {});
+  assert.deepEqual(third.workspaces['d:/projects'], { mode: 'custom', hidden: [] });
 
   // 不修改入参
-  assert.deepEqual(second.overrides, { 'd:/projects': ['tool:a', 'tool:b'] });
+  assert.deepEqual(second.workspaces, { 'd:/projects': { mode: 'custom', hidden: ['tool:a', 'tool:b'] } });
 });
 
 test('withHidden：空目录键不写入任何东西', () => {
   const store = withHidden(emptyStore(), '', ['tool:a']);
-  assert.deepEqual(store.overrides, {});
+  assert.deepEqual(store.workspaces, {});
 });
 
 test('estimateChars 只数真正隐藏掉的东西', () => {
@@ -220,11 +229,11 @@ test('normalizeStore：assignments 只收合法 spec，withHidden 不会把它�
   assert.deepEqual(next.assignments, store.assignments);
 });
 
-test('withAssignments：设置与撤销，且不动 overrides', () => {
+test('withAssignments：设置与撤销，且不动 workspaces', () => {
   const base = withHidden(emptyStore(), 'D:\\A', ['tool:x']);
   const withOne = withAssignments(base, [{ spec: 'tool:read', group: 'tool-fs' }]);
   assert.deepEqual(withOne.assignments, { 'tool:read': 'tool-fs' });
-  assert.deepEqual(withOne.overrides, { 'd:/a': ['tool:x'] });
+  assert.deepEqual(withOne.workspaces, { 'd:/a': { mode: 'custom', hidden: ['tool:x'] } });
 
   const cleared = withAssignments(withOne, [{ spec: 'tool:read', group: '' }]);
   assert.deepEqual(cleared.assignments, {});
@@ -277,3 +286,140 @@ test('applyAssignments：没有 assignments 时原样返回', () => {
   assert.equal(applyAssignments(plan, undefined), plan);
 });
 
+test('normalizeStore：v1 overrides 迁移为 workspaces[dir].mode=custom', () => {
+  const store = normalizeStore({
+    version: 1,
+    overrides: { 'D:\\Projects': ['tool:b', 'tool:a'] },
+    assignments: { 'tool:read': 'fs' },
+  });
+  assert.equal(store.version, 2);
+  assert.deepEqual(store.workspaces['d:/projects'], { mode: 'custom', hidden: ['tool:a', 'tool:b'] });
+  assert.deepEqual(store.assignments, { 'tool:read': 'fs' });
+  assert.equal(store.overrides, undefined, 'overrides 不应残留');
+});
+
+test('normalizeStore：没有 global 字段时不写 global（缺失即 all）', () => {
+  const store = normalizeStore({ version: 2, workspaces: {}, assignments: {} });
+  assert.equal(store.global, undefined);
+});
+
+test('normalizeStore：global.mode 非法值退回 all，hidden 仍保留', () => {
+  const store = normalizeStore({ global: { mode: 'nonsense', hidden: ['plugin:x'] } });
+  assert.deepEqual(store.global, { mode: 'all', hidden: ['plugin:x'] });
+});
+
+test('normalizeStore：工作区 mode 非法值退回 follow', () => {
+  const store = normalizeStore({ workspaces: { 'D:\\A': { mode: 'bogus', hidden: ['tool:x'] } } });
+  assert.deepEqual(store.workspaces['d:/a'], { mode: 'follow', hidden: ['tool:x'] });
+});
+
+test('normalizeStore：mode=custom 且 hidden 为空数组时条目必须保留', () => {
+  const store = normalizeStore({ workspaces: { 'D:\\A': { mode: 'custom', hidden: [] } } });
+  assert.deepEqual(store.workspaces['d:/a'], { mode: 'custom', hidden: [] });
+});
+
+test('normalizeStore：global 坏数据丢弃但不影响 workspaces', () => {
+  const store = normalizeStore({ global: 'nope', workspaces: { 'D:\\A': { mode: 'all' } } });
+  assert.equal(store.global, undefined);
+  assert.deepEqual(store.workspaces['d:/a'], { mode: 'all', hidden: [] });
+});
+
+test('normalizeStore：hidden 类型错误只丢该字段，不抛异常', () => {
+  // 回归测试：v1 有 Array.isArray 守卫，丢了会让 loadStore 落到 emptyStore 丢掉全部配置
+  const store = normalizeStore({
+    global: { mode: 'custom', hidden: 'oops' },
+    workspaces: { 'D:\\A': { mode: 'custom', hidden: 42 } },
+  });
+  assert.deepEqual(store.global, { mode: 'custom', hidden: [] });
+  assert.deepEqual(store.workspaces['d:/a'], { mode: 'custom', hidden: [] });
+});
+
+
+test('withWorkspace：只改 mode 时保留 hidden', () => {
+  const base = normalizeStore({ workspaces: { 'D:\\A': { mode: 'custom', hidden: ['tool:x'] } } });
+  const next = withWorkspace(base, 'D:\\A', { mode: 'all' });
+  assert.deepEqual(next.workspaces['d:/a'], { mode: 'all', hidden: ['tool:x'] });
+});
+
+test('withWorkspace：只改 hidden 时保留 mode', () => {
+  const base = normalizeStore({ workspaces: { 'D:\\A': { mode: 'follow', hidden: [] } } });
+  const next = withWorkspace(base, 'D:\\A', { hidden: ['tool:y'] });
+  assert.deepEqual(next.workspaces['d:/a'], { mode: 'follow', hidden: ['tool:y'] });
+});
+
+test('withWorkspace：新建条目默认 follow', () => {
+  const next = withWorkspace(emptyStore(), 'D:\\New', {});
+  assert.deepEqual(next.workspaces['d:/new'], { mode: 'follow', hidden: [] });
+});
+
+test('withWorkspace：非法 mode 被忽略，保持原值', () => {
+  const base = normalizeStore({ workspaces: { 'D:\\A': { mode: 'all', hidden: [] } } });
+  const next = withWorkspace(base, 'D:\\A', { mode: 'bogus' });
+  assert.equal(next.workspaces['d:/a'].mode, 'all');
+});
+
+test('withGlobal：设置与删除（删除要走 clearGlobal）', () => {
+  const withCustom = withGlobal(emptyStore(), { mode: 'custom', hidden: ['plugin:a'] });
+  assert.deepEqual(withCustom.global, { mode: 'custom', hidden: ['plugin:a'] });
+  // 空 patch 不再是「删除」，而是「无修改」——删除是破坏性操作，必须显式表达
+  const untouched = withGlobal(withCustom, {});
+  assert.deepEqual(untouched.global, { mode: 'custom', hidden: ['plugin:a'] });
+  const cleared = clearGlobal(withCustom);
+  assert.equal(cleared.global, undefined);
+});
+
+test('withGlobal：只给 hidden 新建时默认 custom', () => {
+  const next = withGlobal(emptyStore(), { hidden: ['plugin:a'] });
+  assert.deepEqual(next.global, { mode: 'custom', hidden: ['plugin:a'] });
+});
+
+test('withAssignments：透传 global 与 workspaces', () => {
+  const base = withGlobal(normalizeStore({ workspaces: { 'D:\\A': { mode: 'all', hidden: [] } } }), { mode: 'custom', hidden: ['tool:x'] });
+  const next = withAssignments(base, [{ spec: 'tool:read', group: 'fs' }]);
+  assert.deepEqual(next.global, base.global);
+  assert.deepEqual(next.workspaces, base.workspaces);
+  assert.deepEqual(next.assignments, { 'tool:read': 'fs' });
+});
+
+
+const wsStore = (global, workspaces) => normalizeStore(global ? { global, workspaces } : { workspaces });
+
+test('resolvePolicy：未配置任何东西 → none，不隐藏', () => {
+  assert.deepEqual(resolvePolicy(emptyStore(), 'D:\\Any'), { source: 'none', mode: 'all', hidden: [], key: '' });
+});
+
+test('resolvePolicy：工作区 custom 优先于全局 custom', () => {
+  const store = wsStore({ mode: 'custom', hidden: ['plugin:g'] }, { 'D:\\A': { mode: 'custom', hidden: ['plugin:w'] } });
+  const r = resolvePolicy(store, 'D:\\A\\sub');
+  assert.equal(r.source, 'workspace');
+  assert.deepEqual(r.hidden, ['plugin:w']);
+});
+
+test('resolvePolicy：工作区 all 覆盖全局 custom', () => {
+  const store = wsStore({ mode: 'custom', hidden: ['plugin:g'] }, { 'D:\\A': { mode: 'all', hidden: ['plugin:old'] } });
+  assert.deepEqual(resolvePolicy(store, 'D:\\A').hidden, []);
+  assert.equal(resolvePolicy(store, 'D:\\A').source, 'workspace');
+});
+
+test('resolvePolicy：工作区 follow 时套用全局', () => {
+  const store = wsStore({ mode: 'custom', hidden: ['plugin:g'] }, { 'D:\\A': { mode: 'follow', hidden: ['plugin:stale'] } });
+  const r = resolvePolicy(store, 'D:\\A');
+  assert.equal(r.source, 'global');
+  assert.deepEqual(r.hidden, ['plugin:g']);
+});
+
+test('resolvePolicy：父子目录取最深匹配，子目录 all 压过父目录 custom', () => {
+  const store = wsStore(undefined, {
+    'D:\\Proj': { mode: 'custom', hidden: ['plugin:p'] },
+    'D:\\Proj\\api': { mode: 'all', hidden: [] },
+  });
+  assert.deepEqual(resolvePolicy(store, 'D:\\Proj\\api\\src').hidden, []);
+  assert.deepEqual(resolvePolicy(store, 'D:\\Proj\\web').hidden, ['plugin:p']);
+});
+
+test('resolvePolicy：mode=custom 且 hidden 为空 → source=workspace，不回落全局', () => {
+  const store = wsStore({ mode: 'custom', hidden: ['plugin:g'] }, { 'D:\\A': { mode: 'custom', hidden: [] } });
+  const r = resolvePolicy(store, 'D:\\A');
+  assert.equal(r.source, 'workspace');
+  assert.deepEqual(r.hidden, []);
+});
