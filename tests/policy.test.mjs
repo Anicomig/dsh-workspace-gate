@@ -10,6 +10,7 @@ import {
   normalizeDir,
   normalizeStore,
   pickDir,
+  resolvePolicy,
   resolveHidden,
   sectionOwner,
   tokensOf,
@@ -374,4 +375,47 @@ test('withAssignments：透传 global 与 workspaces', () => {
   assert.deepEqual(next.global, base.global);
   assert.deepEqual(next.workspaces, base.workspaces);
   assert.deepEqual(next.assignments, { 'tool:read': 'fs' });
+});
+
+
+const wsStore = (global, workspaces) => normalizeStore(global ? { global, workspaces } : { workspaces });
+
+test('resolvePolicy：未配置任何东西 → none，不隐藏', () => {
+  assert.deepEqual(resolvePolicy(emptyStore(), 'D:\\Any'), { source: 'none', mode: 'all', hidden: [], key: '' });
+});
+
+test('resolvePolicy：工作区 custom 优先于全局 custom', () => {
+  const store = wsStore({ mode: 'custom', hidden: ['plugin:g'] }, { 'D:\\A': { mode: 'custom', hidden: ['plugin:w'] } });
+  const r = resolvePolicy(store, 'D:\\A\\sub');
+  assert.equal(r.source, 'workspace');
+  assert.deepEqual(r.hidden, ['plugin:w']);
+});
+
+test('resolvePolicy：工作区 all 覆盖全局 custom', () => {
+  const store = wsStore({ mode: 'custom', hidden: ['plugin:g'] }, { 'D:\\A': { mode: 'all', hidden: ['plugin:old'] } });
+  assert.deepEqual(resolvePolicy(store, 'D:\\A').hidden, []);
+  assert.equal(resolvePolicy(store, 'D:\\A').source, 'workspace');
+});
+
+test('resolvePolicy：工作区 follow 时套用全局', () => {
+  const store = wsStore({ mode: 'custom', hidden: ['plugin:g'] }, { 'D:\\A': { mode: 'follow', hidden: ['plugin:stale'] } });
+  const r = resolvePolicy(store, 'D:\\A');
+  assert.equal(r.source, 'global');
+  assert.deepEqual(r.hidden, ['plugin:g']);
+});
+
+test('resolvePolicy：父子目录取最深匹配，子目录 all 压过父目录 custom', () => {
+  const store = wsStore(undefined, {
+    'D:\\Proj': { mode: 'custom', hidden: ['plugin:p'] },
+    'D:\\Proj\\api': { mode: 'all', hidden: [] },
+  });
+  assert.deepEqual(resolvePolicy(store, 'D:\\Proj\\api\\src').hidden, []);
+  assert.deepEqual(resolvePolicy(store, 'D:\\Proj\\web').hidden, ['plugin:p']);
+});
+
+test('resolvePolicy：mode=custom 且 hidden 为空 → source=workspace，不回落全局', () => {
+  const store = wsStore({ mode: 'custom', hidden: ['plugin:g'] }, { 'D:\\A': { mode: 'custom', hidden: [] } });
+  const r = resolvePolicy(store, 'D:\\A');
+  assert.equal(r.source, 'workspace');
+  assert.deepEqual(r.hidden, []);
 });
