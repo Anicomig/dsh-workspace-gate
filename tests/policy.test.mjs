@@ -14,7 +14,9 @@ import {
   sectionOwner,
   tokensOf,
   withAssignments,
+  withGlobal,
   withHidden,
+  withWorkspace,
 } from '../lib/policy.mjs';
 
 test('normalizeDir 统一分隔符、去尾斜杠、转小写', () => {
@@ -330,3 +332,46 @@ test('normalizeStore：hidden 类型错误只丢该字段，不抛异常', () =>
   assert.deepEqual(store.workspaces['d:/a'], { mode: 'custom', hidden: [] });
 });
 
+
+test('withWorkspace：只改 mode 时保留 hidden', () => {
+  const base = normalizeStore({ workspaces: { 'D:\\A': { mode: 'custom', hidden: ['tool:x'] } } });
+  const next = withWorkspace(base, 'D:\\A', { mode: 'all' });
+  assert.deepEqual(next.workspaces['d:/a'], { mode: 'all', hidden: ['tool:x'] });
+});
+
+test('withWorkspace：只改 hidden 时保留 mode', () => {
+  const base = normalizeStore({ workspaces: { 'D:\\A': { mode: 'follow', hidden: [] } } });
+  const next = withWorkspace(base, 'D:\\A', { hidden: ['tool:y'] });
+  assert.deepEqual(next.workspaces['d:/a'], { mode: 'follow', hidden: ['tool:y'] });
+});
+
+test('withWorkspace：新建条目默认 follow', () => {
+  const next = withWorkspace(emptyStore(), 'D:\\New', {});
+  assert.deepEqual(next.workspaces['d:/new'], { mode: 'follow', hidden: [] });
+});
+
+test('withWorkspace：非法 mode 被忽略，保持原值', () => {
+  const base = normalizeStore({ workspaces: { 'D:\\A': { mode: 'all', hidden: [] } } });
+  const next = withWorkspace(base, 'D:\\A', { mode: 'bogus' });
+  assert.equal(next.workspaces['d:/a'].mode, 'all');
+});
+
+test('withGlobal：设置与删除', () => {
+  const withCustom = withGlobal(emptyStore(), { mode: 'custom', hidden: ['plugin:a'] });
+  assert.deepEqual(withCustom.global, { mode: 'custom', hidden: ['plugin:a'] });
+  const cleared = withGlobal(withCustom, {});
+  assert.equal(cleared.global, undefined);
+});
+
+test('withGlobal：只给 hidden 新建时默认 custom', () => {
+  const next = withGlobal(emptyStore(), { hidden: ['plugin:a'] });
+  assert.deepEqual(next.global, { mode: 'custom', hidden: ['plugin:a'] });
+});
+
+test('withAssignments：透传 global 与 workspaces', () => {
+  const base = withGlobal(normalizeStore({ workspaces: { 'D:\\A': { mode: 'all', hidden: [] } } }), { mode: 'custom', hidden: ['tool:x'] });
+  const next = withAssignments(base, [{ spec: 'tool:read', group: 'fs' }]);
+  assert.deepEqual(next.global, base.global);
+  assert.deepEqual(next.workspaces, base.workspaces);
+  assert.deepEqual(next.assignments, { 'tool:read': 'fs' });
+});
