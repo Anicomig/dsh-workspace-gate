@@ -18,6 +18,8 @@ window.__ModuleLoader__.load({
 
     const NS = 'workspace-gate';
     const API = '/workspace-gate';
+    /** 全局面板的伪目录键。真实目录键都经过 normalizeDir（小写、正斜杠），不会与它撞。 */
+    const GLOBAL_DIR = '__global__';
 
     const zh = {
       tab: '按工作区',
@@ -65,6 +67,14 @@ window.__ModuleLoader__.load({
       noneYet: '还没有工作区，点右上角「添加目录」。',
       followGlobal: '跟随全局',
       hasOwn: '有单独配置',
+      globalConfig: '全局配置',
+      policy: '策略',
+      modeFollow: '跟随全局',
+      modeAll: '全部启用',
+      modeCustom: '自定义',
+      modeHint: '切换策略不会清空已保存的勾选',
+      inherited: (n) => `继承自全局：已关 ${n} 组`,
+      ownCount: (n) => `自定义 ${n} 组`,
       switchLabel: (name) => `切换 ${name} 的可见性`,
       descTools: '工具',
       descSections: '段',
@@ -116,6 +126,14 @@ window.__ModuleLoader__.load({
       noneYet: 'No workspace yet — use “Add directory”.',
       followGlobal: 'follows global',
       hasOwn: 'own override',
+      globalConfig: 'Global',
+      policy: 'Policy',
+      modeFollow: 'Follow global',
+      modeAll: 'All enabled',
+      modeCustom: 'Custom',
+      modeHint: 'Switching policy keeps your saved selections',
+      inherited: (n) => `Inherited from global: ${n} groups off`,
+      ownCount: (n) => `Custom, ${n} groups off`,
       switchLabel: (name) => `Toggle ${name} visibility`,
       descTools: 'tools',
       descSections: 'sections',
@@ -299,14 +317,17 @@ window.__ModuleLoader__.load({
 
         React.useEffect(() => {
           if (!snapshot || dir) return;
-          const configured = Object.keys(snapshot.overrides || {});
+          const configured = Object.keys(snapshot.workspaces || {});
           const first = configured.length ? configured[0] : (snapshot.dirs || [])[0] && snapshot.dirs[0].key;
           if (first) setDir(first);
         }, [snapshot, dir]);
 
         React.useEffect(() => {
           if (!snapshot || !dir) return;
-          const specs = (snapshot.overrides || {})[dir];
+          const specs =
+            dir === GLOBAL_DIR
+              ? (snapshot.global && snapshot.global.hidden) || []
+              : (snapshot.workspaces && snapshot.workspaces[dir] && snapshot.workspaces[dir].hidden) || [];
           setHidden(Array.isArray(specs) ? [...specs] : []);
           setMessage('');
         }, [snapshot, dir]);
@@ -328,7 +349,12 @@ window.__ModuleLoader__.load({
         }, [snapshot, filter]);
 
         const savedJson = React.useMemo(() => {
-          const specs = (snapshot && snapshot.overrides && snapshot.overrides[dir]) || [];
+          // 不读 workspaces/global 的话 savedJson 恒为 '[]'，dirty 就永远等于 hidden.length>0，
+          // 用户点「清空」后 dirty=false，保存按钮永远禁用，再也清不掉已存清单。
+          const specs =
+            dir === GLOBAL_DIR
+              ? (snapshot && snapshot.global && snapshot.global.hidden) || []
+              : (snapshot && snapshot.workspaces && snapshot.workspaces[dir] && snapshot.workspaces[dir].hidden) || [];
           return JSON.stringify([...specs].sort());
         }, [snapshot, dir]);
         const dirty = JSON.stringify([...hidden].sort()) !== savedJson;
@@ -398,10 +424,31 @@ window.__ModuleLoader__.load({
           if (!dir || busy) return;
           setBusy(true);
           setMessage('');
-          post('/apply', { dir, hidden })
+          // 全局面板必须打 /global：否则会存成一个名叫 __global__ 的假工作区，
+          // 真正的 global.hidden 一个字节都写不进去。
+          const request =
+            dir === GLOBAL_DIR
+              ? post('/global', mode === 'custom' ? { mode, hidden } : { mode })
+              : post('/apply', mode === 'custom' ? { dir, mode, hidden } : { dir, mode });
+          request
             .then((data) => {
               if (data && data.groups) setSnapshot(data);
               setMessage(t('ok'));
+            })
+            .catch((cause) => setMessage(t('failed') + String(cause && cause.message ? cause.message : cause)))
+            .finally(() => setBusy(false));
+        };
+
+        /** 切换策略：立即落盘，不动 hidden。 */
+        const setMode = (next) => {
+          if (busy) return;
+          setBusy(true);
+          setMessage('');
+          const request =
+            dir === GLOBAL_DIR ? post('/global', { mode: next }) : post('/mode', { dir, mode: next });
+          request
+            .then((data) => {
+              if (data && data.groups) setSnapshot(data);
             })
             .catch((cause) => setMessage(t('failed') + String(cause && cause.message ? cause.message : cause)))
             .finally(() => setBusy(false));
@@ -426,7 +473,7 @@ window.__ModuleLoader__.load({
             if ((prev.dirs || []).some((d) => d.key === key)) return prev;
             return {
               ...prev,
-              dirs: [...(prev.dirs || []), { key, path: value, title: '', source: 'manual', sessions: 0, hidden: [] }].sort(
+              dirs: [...(prev.dirs || []), { key, path: value, title: '', source: 'manual', sessions: 0, mode: 'follow', hidden: [] }].sort(
                 (a, b) => String(a.path).localeCompare(String(b.path)),
               ),
             };
@@ -445,9 +492,61 @@ window.__ModuleLoader__.load({
 
         const dirs = snapshot.dirs || [];
         const activeDir = dirs.find((d) => d.key === dir);
-        const hasOwnOverride = Boolean(activeDir && activeDir.hidden && activeDir.hidden.length);
+        const isGlobal = dir === GLOBAL_DIR;
+
+        // 当前策略：全局只有 all/custom；工作区三态
+        // 判定逻辑与 lib/client-view.mjs 的 clientPolicyView() 必须一致。
+        // 浏览器端 require 只能解析 seed 模块，读不到同包文件，所以这里只能手工同步；
+        // 那边有单测锁行为，改一处务必改两处。
+        const mode = isGlobal
+          ? ((snapshot.global && snapshot.global.mode) || 'all')
+          : ((snapshot.workspaces && snapshot.workspaces[dir] && snapshot.workspaces[dir].mode) || 'follow');
+        const globalHiddenCount = ((snapshot.global && snapshot.global.hidden) || []).length;
+        // 非自定义时所有勾选置灰（保留数据，只禁用操作）
+        const locked = mode !== 'custom';
+
+        // 全局面板没有「跟随全局」——它自己就是全局
+        const policyOptions = [
+          ...(isGlobal ? [] : [{ value: 'follow', label: t('modeFollow') }]),
+          { value: 'all', label: t('modeAll') },
+          { value: 'custom', label: t('modeCustom') },
+        ];
 
         // ── 工作区切换（一行 chip，选中态加深）
+        const chipStyle = (selected) => ({
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 6,
+          maxWidth: 260,
+          padding: '5px 11px',
+          borderRadius: 999,
+          cursor: 'pointer',
+          fontSize: 12,
+          lineHeight: '18px',
+          color: selected ? T.label : T.muted,
+          background: selected ? T.bg2 : 'transparent',
+          border: `1px solid ${selected ? T.border2 : T.border1}`,
+          transition: 'background 120ms ease, color 120ms ease, border-color 120ms ease',
+        });
+
+        // 全局配置永远排在最前
+        const globalChip = h(
+          'button',
+          {
+            key: GLOBAL_DIR,
+            type: 'button',
+            title: t('globalConfig'),
+            onClick: () => setDir(GLOBAL_DIR),
+            style: chipStyle(isGlobal),
+          },
+          [
+            h('span', { key: 'l', style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, t('globalConfig')),
+            globalHiddenCount
+              ? h('span', { key: 'c', style: { ...S.mono, fontSize: 10, color: T.brand } }, String(globalHiddenCount))
+              : null,
+          ],
+        );
+
         const dirChips = dirs.map((entry) => {
           const selected = entry.key === dir;
           const count = Array.isArray(entry.hidden) ? entry.hidden.length : 0;
@@ -712,7 +811,7 @@ window.__ModuleLoader__.load({
                 h(Switch, {
                   key: 'sw',
                   checked: on,
-                  disabled: busy,
+                  disabled: busy || locked,
                   onToggle: (next) => toggleSpec(pluginSpec, next),
                   label: t('switchLabel', title),
                 }),
@@ -946,6 +1045,7 @@ window.__ModuleLoader__.load({
           // 工作区 chips + 添加目录
           h('div', { key: 'dirs', style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' } }, [
             h('span', { key: 'lb', style: { fontSize: 12, color: T.muted, marginRight: 2 } }, t('workspaces')),
+            globalChip,
             ...dirChips,
             adding
               ? h('span', { key: 'aa', style: { display: 'inline-flex', alignItems: 'center', gap: 6 } }, [
@@ -971,10 +1071,53 @@ window.__ModuleLoader__.load({
                 ),
           ]),
 
+          // 策略行：全局只有「全部启用 / 自定义」；工作区三态
+          h('div', { key: 'policy', style: { display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap', fontSize: 12 } }, [
+            h('span', { key: 'lb', style: { color: T.muted } }, `${t('policy')}:`),
+            ...policyOptions.map((option) =>
+              h(
+                'button',
+                {
+                  key: option.value,
+                  type: 'button',
+                  disabled: busy,
+                  onClick: () => setMode(option.value),
+                  title: t('modeHint'),
+                  style: {
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 6,
+                    padding: '3px 10px',
+                    borderRadius: 999,
+                    cursor: busy ? 'default' : 'pointer',
+                    fontSize: 12,
+                    color: mode === option.value ? T.label : T.muted,
+                    background: mode === option.value ? T.bg2 : 'transparent',
+                    border: `1px solid ${mode === option.value ? T.brand : T.border1}`,
+                  },
+                },
+                [
+                  h('span', { key: 'dot', style: { width: 7, height: 7, borderRadius: 999, background: mode === option.value ? T.brand : T.border2 } }),
+                  h('span', { key: 'l' }, option.label),
+                ],
+              ),
+            ),
+            // 跟随全局且全局确实藏了东西时，告诉他继承了哪几组
+            !isGlobal && mode === 'follow' && globalHiddenCount
+              ? h('span', { key: 'inh', style: { fontSize: 11, color: T.muted } }, t('inherited', globalHiddenCount))
+              : null,
+            locked ? h('span', { key: 'lock', style: { fontSize: 11, color: T.warn } }, t('modeHint')) : null,
+          ]),
+
           // 当前目录状态
           h('div', { key: 'status', style: { display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', fontSize: 11, color: T.muted } }, [
             h('span', { key: 'p', style: { ...S.mono, fontSize: 11, color: T.label } }, activeDir ? activeDir.path : dir),
-            h('span', { key: 'o' }, hasOwnOverride ? `· ${t('hasOwn')}` : `· ${t('followGlobal')}`),
+            h('span', { key: 'o' }, `· ${
+              isGlobal
+                ? (mode === 'custom' ? t('modeCustom') : t('modeAll'))
+                : (mode === 'custom' ? t('ownCount', (activeDir && activeDir.effective) || 0)
+                  : mode === 'all' ? t('modeAll') : t('followGlobal'))
+            }`),
             h('span', { key: 's' }, `· ${t('saved', offGroups)} · ${t('full', totalGroups)}`),
             savedChars ? h('span', { key: 't', style: { color: T.brand } }, `· ${t('approxTokens', formatTokens(savedChars))} ${t('tokensUnit')}`) : null,
             dirty ? h('span', { key: 'd', style: { color: T.warn } }, `· ${t('dirty')}`) : null,
@@ -1020,7 +1163,7 @@ window.__ModuleLoader__.load({
             ),
             h(
               'button',
-              { key: 'clear', type: 'button', style: S.ghost, disabled: busy || !dir || hidden.length === 0, onClick: () => setHidden([]) },
+              { key: 'clear', type: 'button', style: S.ghost, disabled: busy || !dir || locked || hidden.length === 0, onClick: () => setHidden([]) },
               t('clear'),
             ),
             message ? h('span', { key: 'm', style: { fontSize: 11, color: T.success } }, message) : null,
