@@ -200,9 +200,10 @@ workspace_gate(action:"global", clear:true)              # 删除全局段（必
 
 > **`set` 与 `mode` 必须分清。** v2 里 `mode` 是唯一决定行为的字段，`hidden` 只是数据：
 >
-> - `action:"set"` **只改清单、不动 mode**。对一个 `mode:"all"` 的目录 `set` 后，清单写进去了
->   但**一条都不生效**——返回里的 `effective` 就是生效条数，看到 0 就说明没起作用。
-> - 要让它生效得用 `action:"mode"` 改成 `custom`。
+> - 对**已存在的目录**，`action:"set"` **只改清单、不动 mode**。对一个 `mode:"all"` 的目录
+>   `set` 后，清单写进去了但**一条都不生效**——返回里的 `effective` 就是生效条数，看到 0 就说明没起作用。
+> - 对**从未配置过的目录**，`set` 会把 `mode` 默认落成 `custom`（否则写进去的清单永不生效）。
+> - 要让一个已有目录的清单生效，用 `action:"mode"` 改成 `custom`。
 >
 > 同理，`action:"global"` 不传任何参数**只读**（不会删配置）；删除必须显式 `clear:true`。
 

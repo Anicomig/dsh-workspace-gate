@@ -216,10 +216,12 @@ workspace_gate(action:"global", clear:true)              # delete the global sec
 > **`set` and `mode` are not the same thing.** In v2 `mode` is the only field that decides
 > behavior; `hidden` is just data:
 >
-> - `action:"set"` **changes the list and leaves `mode` alone**. On a directory whose mode is
->   `all`, the list is written but **nothing is hidden** — the `effective` count in the response
->   says how many actually apply; a 0 means it had no effect.
-> - Use `action:"mode"` to switch it to `custom` and make that list take effect.
+> - On a directory that **already exists**, `action:"set"` **changes the list and leaves `mode`
+>   alone**. On a directory whose mode is `all`, the list is written but **nothing is hidden** —
+>   the `effective` count in the response says how many actually apply; a 0 means no effect.
+> - On a **never-configured directory**, `set` defaults `mode` to `custom` (otherwise the list you
+>   wrote would never take effect).
+> - To make an existing directory's list take effect, use `action:"mode"` to switch to `custom`.
 >
 > Likewise `action:"global"` with no arguments is **read-only** (it never deletes); removing the
 > global section requires an explicit `clear:true`.

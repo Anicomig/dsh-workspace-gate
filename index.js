@@ -846,11 +846,15 @@ export function apply(ctx) {
         saveStore(store);
         // 一并返回 effective：mode 才是决定行为的字段，给 mode=all 的目录写清单会零生效。
         // 调用方不必再查一次 state() 就能发现「存了但没生效」。
-        return json(res, 200, {
-          ok: true,
-          effective: resolvePolicy(store, normalizeDir(dir)).hidden.length,
-          ...(await state(false)),
-        });
+        {
+          const resolved = resolvePolicy(store, normalizeDir(dir));
+          return json(res, 200, {
+            ok: true,
+            effective: resolved.hidden.length,
+            applied: resolved.source === 'workspace',
+            ...(await state(false)),
+          });
+        }
       }
 
       if (tail === 'mode') {
@@ -1039,6 +1043,7 @@ export function apply(ctx) {
           for (const s of args?.show ?? []) current.delete(String(s).trim());
           store = withWorkspace(store, key, { hidden: [...current] });
           saveStore(store);
+          const resolved = resolvePolicy(store, key);
           return safeJson({
             ok: true,
             dir: key,
@@ -1046,7 +1051,11 @@ export function apply(ctx) {
             hidden: store.workspaces[key]?.hidden ?? [],
             // mode 才是决定行为的字段：mode=all 时这份清单一条都不生效。
             // 一并返回 effective，模型不必再查一次就能发现「存了但没生效」。
-            effective: resolvePolicy(store, key).hidden.length,
+            effective: resolved.hidden.length,
+            // applied 说明这 N 条是否来自**你刚写的**清单：
+            // follow 的目录会返回 source='global'，effective 数的是全局继承来的条目，
+            // 你自己写的清单一条都没生效——只看 effective 会被误导。
+            applied: resolved.source === 'workspace',
           });
         }
 
@@ -1069,7 +1078,7 @@ export function apply(ctx) {
           if (args?.clear === true) {
             store = withGlobal(store, { mode: 'all', hidden: [] });
             saveStore(store);
-            return safeJson({ ok: true, global: store.global ?? null });
+            return safeJson({ ok: true, effective: store.global?.mode === 'custom' ? (store.global?.hidden?.length ?? 0) : 0, global: store.global ?? null });
           }
           const patch = {};
           if (args?.mode !== undefined) {
@@ -1101,7 +1110,7 @@ export function apply(ctx) {
           }
           store = withGlobal(store, patch);
           saveStore(store);
-          return safeJson({ ok: true, global: store.global ?? null });
+          return safeJson({ ok: true, effective: store.global?.mode === 'custom' ? (store.global?.hidden?.length ?? 0) : 0, global: store.global ?? null });
         }
 
         const snapshot = await state(false);

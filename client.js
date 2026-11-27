@@ -500,7 +500,7 @@ window.__ModuleLoader__.load({
 
         // 当前策略：全局只有 all/custom；工作区三态
         // ⚠️ 判定逻辑与 lib/client-view.mjs 的 clientPolicyView() 必须一致，但**没有任何测试覆盖下面这些行**：
-        // client-view.mjs 是同一套判定的一份副本，它的 8 条单测只证明那份副本自洽。
+        // client-view.mjs 是同一套判定的一份副本，它的 9 条单测只证明那份副本自洽。
         // 浏览器端 require 只能解析 seed 模块，读不到同包文件，所以这边只能手工同步。
         // 改这里时请人工对照 lib/client-view.mjs，并同步改那边的副本。
         const mode = isGlobal
@@ -516,18 +516,28 @@ window.__ModuleLoader__.load({
           { value: 'all', label: t('modeAll') },
           { value: 'custom', label: t('modeCustom') },
         ];
-        // 生效条数取服务端算好的 effective（不用 global.hidden.length）：
+        // 继承条数取服务端算好的 effective（不用 global.hidden.length）：
         // 子目录挂在一个 custom 父目录下时，实际生效的是父目录那份清单，
         // 读全局条数会显示成错的数字。
-        // mode 不是 custom 时一律为 0——清单还留着，但一条都没生效。
-        const effectiveCount = mode !== 'custom'
-          ? 0
-          : isGlobal
-            ? ((snapshot.global && snapshot.global.hidden) || []).length
-            : (activeDir && activeDir.effective) || 0;
-        // 「已关 N 组」用的是同一个数（原来数清单里保留的 plugin: 条目，
-        // mode=all 时会显示「全部启用 · 已关 19 组」自相矛盾）
-        const appliedCount = effectiveCount;
+        //
+        // 不要在这里按 mode 再归零：`dir.effective` 已经是三态解析后的**真实生效条数**。
+        // follow 时客户端拿不到全局清单，归零会导致「跟随全局 · 已关 0 组」少报，
+        // 还会把下面「继承自全局：已关 N 组」这条提示一起压制掉。
+        const effectiveCount = isGlobal
+          ? (mode === 'custom' ? ((snapshot.global && snapshot.global.hidden) || []).length : 0)
+          : (activeDir && activeDir.effective) || 0;
+        // 状态行的「已关 N 组 · 共 M 组」：N 必须和 M 同单位，只能数 plugin: 条目。
+        // 直接拿 hidden.length 会把组内每个 tool/section 都算成一组
+        // （实测一个组的 19 条清单里 18 条是 tool/section，会显示成「已关 19 组」而实际只关 1 组）。
+        // follow 时数实际继承来的那份清单（source=workspace 表示继承父工作区，否则跟全局）。
+        const countPlugins = (list) => (list || []).filter((s) => String(s || '').startsWith('plugin:')).length;
+        const inheritedList = isGlobal
+          ? (snapshot.global && snapshot.global.hidden) || []
+          : activeDir && activeDir.source === 'workspace'
+            ? (snapshot.workspaces && snapshot.workspaces[activeDir.key] && snapshot.workspaces[activeDir.key].hidden) || []
+            : (snapshot.global && snapshot.global.hidden) || [];
+        const appliedCount =
+          mode === 'custom' ? countPlugins(hidden) : mode === 'follow' ? countPlugins(inheritedList) : 0;
         const inheritedFrom = !isGlobal && activeDir ? activeDir.source : 'none';
 
         // ── 工作区切换（一行 chip，选中态加深）
