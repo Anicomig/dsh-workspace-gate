@@ -844,7 +844,13 @@ export function apply(ctx) {
         if (Array.isArray(body?.hidden)) patch.hidden = body.hidden;
         store = withWorkspace(store, dir, patch);
         saveStore(store);
-        return json(res, 200, { ok: true, ...(await state(false)) });
+        // 一并返回 effective：mode 才是决定行为的字段，给 mode=all 的目录写清单会零生效。
+        // 调用方不必再查一次 state() 就能发现「存了但没生效」。
+        return json(res, 200, {
+          ok: true,
+          effective: resolvePolicy(store, normalizeDir(dir)).hidden.length,
+          ...(await state(false)),
+        });
       }
 
       if (tail === 'mode') {
@@ -858,7 +864,11 @@ export function apply(ctx) {
         }
         store = withWorkspace(store, dir, { mode });
         saveStore(store);
-        return json(res, 200, { ok: true, ...(await state(false)) });
+        return json(res, 200, {
+          ok: true,
+          effective: resolvePolicy(store, normalizeDir(dir)).hidden.length,
+          ...(await state(false)),
+        });
       }
 
       if (tail === 'global') {
@@ -869,7 +879,7 @@ export function apply(ctx) {
         if (body?.clear === true) {
           store = clearGlobal(store);
           saveStore(store);
-          return json(res, 200, { ok: true, ...(await state(false)) });
+          return json(res, 200, { ok: true, effective: 0, ...(await state(false)) });
         }
         const patch = {};
         if (body?.mode !== undefined) {
@@ -884,7 +894,11 @@ export function apply(ctx) {
         }
         store = withGlobal(store, patch);
         saveStore(store);
-        return json(res, 200, { ok: true, ...(await state(false)) });
+        return json(res, 200, {
+          ok: true,
+          effective: store.global?.mode === 'custom' ? (store.global?.hidden?.length ?? 0) : 0,
+          ...(await state(false)),
+        });
       }
 
       if (tail === 'assign') {
@@ -1030,6 +1044,9 @@ export function apply(ctx) {
             dir: key,
             mode: store.workspaces[key]?.mode ?? 'follow',
             hidden: store.workspaces[key]?.hidden ?? [],
+            // mode 才是决定行为的字段：mode=all 时这份清单一条都不生效。
+            // 一并返回 effective，模型不必再查一次就能发现「存了但没生效」。
+            effective: resolvePolicy(store, key).hidden.length,
           });
         }
 
@@ -1043,7 +1060,7 @@ export function apply(ctx) {
           const key = normalizeDir(dir);
           store = withWorkspace(store, key, { mode });
           saveStore(store);
-          return safeJson({ ok: true, dir: key, mode });
+          return safeJson({ ok: true, dir: key, mode, effective: resolvePolicy(store, key).hidden.length });
         }
 
         if (action === 'global') {

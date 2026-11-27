@@ -384,7 +384,9 @@ window.__ModuleLoader__.load({
           return chars;
         }, [snapshot, hidden]);
 
-        const offGroups = hidden.filter((s) => s.startsWith('plugin:')).length;
+        // 「已关 N 组」必须数**生效**的数量，不是清单里保留的数量。
+        // mode=all 的工作区留着旧清单时，两者会不一致；显示保留数会让人以为已经关了。
+        // （appliedCount 在下面 activeDir / mode 声明之后计算）
         const totalGroups = (snapshot && snapshot.groups && snapshot.groups.length) || 0;
 
         const toggleSpec = (spec, on) => {
@@ -497,9 +499,10 @@ window.__ModuleLoader__.load({
         const isGlobal = dir === GLOBAL_DIR;
 
         // 当前策略：全局只有 all/custom；工作区三态
-        // 判定逻辑与 lib/client-view.mjs 的 clientPolicyView() 必须一致。
-        // 浏览器端 require 只能解析 seed 模块，读不到同包文件，所以这里只能手工同步；
-        // 那边有单测锁行为，改一处务必改两处。
+        // ⚠️ 判定逻辑与 lib/client-view.mjs 的 clientPolicyView() 必须一致，但**没有任何测试覆盖下面这些行**：
+        // client-view.mjs 是同一套判定的一份副本，它的 8 条单测只证明那份副本自洽。
+        // 浏览器端 require 只能解析 seed 模块，读不到同包文件，所以这边只能手工同步。
+        // 改这里时请人工对照 lib/client-view.mjs，并同步改那边的副本。
         const mode = isGlobal
           ? ((snapshot.global && snapshot.global.mode) || 'all')
           : ((snapshot.workspaces && snapshot.workspaces[dir] && snapshot.workspaces[dir].mode) || 'follow');
@@ -513,12 +516,18 @@ window.__ModuleLoader__.load({
           { value: 'all', label: t('modeAll') },
           { value: 'custom', label: t('modeCustom') },
         ];
-        // 继承条数取服务端算好的 effective（不用 global.hidden.length）：
+        // 生效条数取服务端算好的 effective（不用 global.hidden.length）：
         // 子目录挂在一个 custom 父目录下时，实际生效的是父目录那份清单，
         // 读全局条数会显示成错的数字。
-        const effectiveCount = isGlobal
-          ? ((snapshot.global && snapshot.global.hidden) || []).length
-          : (activeDir && activeDir.effective) || 0;
+        // mode 不是 custom 时一律为 0——清单还留着，但一条都没生效。
+        const effectiveCount = mode !== 'custom'
+          ? 0
+          : isGlobal
+            ? ((snapshot.global && snapshot.global.hidden) || []).length
+            : (activeDir && activeDir.effective) || 0;
+        // 「已关 N 组」用的是同一个数（原来数清单里保留的 plugin: 条目，
+        // mode=all 时会显示「全部启用 · 已关 19 组」自相矛盾）
+        const appliedCount = effectiveCount;
         const inheritedFrom = !isGlobal && activeDir ? activeDir.source : 'none';
 
         // ── 工作区切换（一行 chip，选中态加深）
@@ -1133,7 +1142,7 @@ window.__ModuleLoader__.load({
                 : (mode === 'custom' ? t('ownCount', (activeDir && activeDir.effective) || 0)
                   : mode === 'all' ? t('modeAll') : t('followGlobal'))
             }`),
-            h('span', { key: 's' }, `· ${t('saved', offGroups)} · ${t('full', totalGroups)}`),
+            h('span', { key: 's' }, `· ${t('saved', appliedCount)} · ${t('full', totalGroups)}`),
             savedChars ? h('span', { key: 't', style: { color: T.brand } }, `· ${t('approxTokens', formatTokens(savedChars))} ${t('tokensUnit')}`) : null,
             dirty ? h('span', { key: 'd', style: { color: T.warn } }, `· ${t('dirty')}`) : null,
           ]),

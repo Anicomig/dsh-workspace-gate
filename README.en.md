@@ -79,7 +79,7 @@ switches, restarting, or reloading plugins.
   user"; the third-party group is expanded by default, official groups collapsed.
 - **Correctable ownership**: every tool/section has an ownership dropdown, so unassigned items can
   be merged into an existing group or a brand-new one.
-- **Model-callable**: the `workspace_gate` tool supports `status` / `list` / `set`.
+- **Model-callable**: the `workspace_gate` tool supports `status` / `list` / `set` / `mode` / `global` / `diagnose`.
 - **Low noise**: no DOM writes, no host client packages imported, colors only via
   `--dsw-alias-*` theme tokens.
 - **Testable**: the core logic lives in `lib/policy.mjs` with 24 unit tests that run without DSH.
@@ -202,10 +202,27 @@ Save. Applies to **new sessions**.
 workspace_gate(action:"status")                          # which sessions hit which directory, what was hidden
 workspace_gate(action:"list")                            # gateable plugins → tool/section names
 workspace_gate(action:"set", dir:"D:\\Projects\\api",
-                hide:["plugin:r18-novel"])               # dir is required here
+                hide:["plugin:r18-novel"])               # changes the list only, not the policy
 workspace_gate(action:"set", dir:"D:\\Projects",
                 show:["tool:read"])                      # remove from the hidden list
+workspace_gate(action:"mode", dir:"D:\\Projects\\api",
+               mode:"custom")                            # change policy: follow / all / custom
+workspace_gate(action:"global")                          # read the global policy (no args = read-only)
+workspace_gate(action:"global", mode:"custom",
+               hide:["plugin:r18-novel"])                # set the global policy
+workspace_gate(action:"global", clear:true)              # delete the global section (explicit)
 ```
+
+> **`set` and `mode` are not the same thing.** In v2 `mode` is the only field that decides
+> behavior; `hidden` is just data:
+>
+> - `action:"set"` **changes the list and leaves `mode` alone**. On a directory whose mode is
+>   `all`, the list is written but **nothing is hidden** — the `effective` count in the response
+>   says how many actually apply; a 0 means it had no effect.
+> - Use `action:"mode"` to switch it to `custom` and make that list take effect.
+>
+> Likewise `action:"global"` with no arguments is **read-only** (it never deletes); removing the
+> global section requires an explicit `clear:true`.
 
 > The tool does not use `deferLoading`: measured, that made it **invisible to sub-sessions**, so
 > the model could never call it. Paying ~300 tokens of schema is the cheaper mistake.

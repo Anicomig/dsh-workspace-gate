@@ -71,7 +71,7 @@ DSH 自带的插件管理只有 **全局** 开关：一个插件要么对所有�
 - **按来源分档**：靠 bundle 的 `availability` 判断"随 dsh 安装"还是"用户自装"，
   第三方档默认展开，官方档默认收起。
 - **归属可手工矫正**：每个工具/段右侧有归属下拉，可以把未归属的项并入已有分组或新建分组。
-- **模型可调**：`workspace_gate` 工具支持 `status` / `list` / `set`。
+- **模型可调**：`workspace_gate` 工具支持 `status` / `list` / `set` / `mode` / `global` / `diagnose`。
 - **可控的噪声**：不写 DOM、不加载宿主客户端包、颜色只用 `--dsw-alias-*` 主题 token。
 - **可测试**：核心逻辑抽在 `lib/policy.mjs`，24 条单测，不启动 DSH 也能跑。
 
@@ -187,10 +187,24 @@ dsh plugin --profile <your-profile> add dsh-workspace-gate@0.1.1
 workspace_gate(action:"status")                          # 最近哪些会话命中了哪个目录、摘掉了什么
 workspace_gate(action:"list")                            # 可门控的插件 → 工具名/段名
 workspace_gate(action:"set", dir:"D:\\Projects\\api",
-                hide:["plugin:r18-novel"])               # 需要显式给 dir
+                hide:["plugin:r18-novel"])               # 只改隐藏清单，不动策略
 workspace_gate(action:"set", dir:"D:\\Projects",
                 show:["tool:read"])                      # 从隐藏清单移除
+workspace_gate(action:"mode", dir:"D:\\Projects\\api",
+               mode:"custom")                            # 改策略：follow / all / custom
+workspace_gate(action:"global")                          # 读全局策略（不传参数 = 只读）
+workspace_gate(action:"global", mode:"custom",
+               hide:["plugin:r18-novel"])                # 设置全局策略
+workspace_gate(action:"global", clear:true)              # 删除全局段（必须显式 clear）
 ```
+
+> **`set` 与 `mode` 必须分清。** v2 里 `mode` 是唯一决定行为的字段，`hidden` 只是数据：
+>
+> - `action:"set"` **只改清单、不动 mode**。对一个 `mode:"all"` 的目录 `set` 后，清单写进去了
+>   但**一条都不生效**——返回里的 `effective` 就是生效条数，看到 0 就说明没起作用。
+> - 要让它生效得用 `action:"mode"` 改成 `custom`。
+>
+> 同理，`action:"global"` 不传任何参数**只读**（不会删配置）；删除必须显式 `clear:true`。
 
 > 这个工具没有用 `deferLoading`：实测打开后子会话里它**直接不可见**，模型想调也调不到。
 
