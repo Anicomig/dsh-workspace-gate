@@ -241,9 +241,11 @@ until you classify them by hand.
 
 ```json
 {
-  "version": 1,
-  "overrides": {
-    "d:/projects/api": ["plugin:r18-novel", "tool:free_search_news"]
+  "version": 2,
+  "global": { "mode": "custom", "hidden": ["plugin:mnemon"] },
+  "workspaces": {
+    "d:/projects/api": { "mode": "custom", "hidden": ["plugin:r18-novel", "tool:free_search_news"] },
+    "d:/open": { "mode": "all" }
   },
   "assignments": {
     "tool:read": "file tools"
@@ -251,12 +253,39 @@ until you classify them by hand.
 }
 ```
 
-- `overrides` — the **per-workspace** hidden list; keys are normalized directories (lowercase,
+- `global` — the **global policy**. Absent means everything visible; `mode` is `all` or `custom`;
+- `workspaces` — the **per-workspace** policy; keys are normalized directories (lowercase,
   `/`-separated) and subdirectories inherit the nearest ancestor;
 - `assignments` — **global** manual ownership; it beats inference and only changes grouping, not
   visibility;
 - a corrupt or unreadable file degrades to an empty configuration (everything visible) — the gate
-  never breaks a session.
+  never breaks a session. A single malformed field drops only that entry, not the rest.
+
+### Policy (mode)
+
+Each workspace is in one of three states:
+
+| State | Meaning |
+|---|---|
+| `follow` | use the global policy. **It follows the global listing only — a parent workspace's list is not inherited** |
+| `all` | hide nothing in this directory |
+| `custom` | use this directory's own `hidden` list |
+
+Resolution order (longest ancestor prefix wins):
+
+```
+workspace custom  >  workspace all  >  global custom  >  everything visible
+```
+
+**Switching policy never clears your saved selections.** `mode` is the only field that decides
+behavior; `hidden` is just data. Setting `mode` to `all` keeps the list on disk, and switching back
+to `custom` brings it into effect again. The checkboxes grey out while the mode is not `custom`,
+but nothing is lost.
+
+### Upgrading from v1
+
+An old file's `overrides` are read as `workspaces[dir] = { mode: "custom", hidden: [...] }` and
+written back as v2 on the next save. **No manual migration, and no configuration is lost.**
 
 ## Why not really disable plugins
 
