@@ -14,6 +14,7 @@ import {
   resolveHidden,
   sectionOwner,
   tokensOf,
+  clearGlobal,
   withAssignments,
   withGlobal,
   withHidden,
@@ -357,10 +358,13 @@ test('withWorkspace：非法 mode 被忽略，保持原值', () => {
   assert.equal(next.workspaces['d:/a'].mode, 'all');
 });
 
-test('withGlobal：设置与删除', () => {
+test('withGlobal：设置与删除（删除要走 clearGlobal）', () => {
   const withCustom = withGlobal(emptyStore(), { mode: 'custom', hidden: ['plugin:a'] });
   assert.deepEqual(withCustom.global, { mode: 'custom', hidden: ['plugin:a'] });
-  const cleared = withGlobal(withCustom, {});
+  // 空 patch 不再是「删除」，而是「无修改」——删除是破坏性操作，必须显式表达
+  const untouched = withGlobal(withCustom, {});
+  assert.deepEqual(untouched.global, { mode: 'custom', hidden: ['plugin:a'] });
+  const cleared = clearGlobal(withCustom);
   assert.equal(cleared.global, undefined);
 });
 

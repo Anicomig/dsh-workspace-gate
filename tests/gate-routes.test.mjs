@@ -132,7 +132,7 @@ test('POST /global 写全局 hidden，mode 默认 custom', async () => {
   assert.deepEqual(res.body.global, { mode: 'custom', hidden: ['plugin:g'] });
 });
 
-test('POST /global 空 body 删除全局段', async () => {
+test('POST /global 空 body 被拒绝（删除必须显式 clear）', async () => {
   const api = await boot({
     version: 2,
     global: { mode: 'custom', hidden: ['plugin:g'] },
@@ -140,8 +140,8 @@ test('POST /global 空 body 删除全局段', async () => {
     assignments: {},
   });
   const res = await call(api.handle, '/global', {});
-  assert.equal(res.status, 200);
-  assert.deepEqual(res.body.global, { mode: 'all', hidden: [] });
+  assert.equal(res.status, 400);
+  assert.match(String(res.body.error), /clear/);
 });
 
 test('POST /global 拒绝非法 mode', async () => {

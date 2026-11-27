@@ -37,14 +37,28 @@ test('clientPolicyView：follow 且全局有 hidden 时给出继承条数', () =
   const view = clientPolicyView(
     { global: { mode: 'custom', hidden: ['plugin:a', 'plugin:b'] }, workspaces: { 'd:/a': { mode: 'follow' } } },
     'd:/a',
+    { source: 'global', effective: 2 },
   );
   assert.equal(view.inherited, 2);
+  assert.equal(view.inheritedFrom, 'global');
+});
+
+test('clientPolicyView：继承父工作区时用 effective，不用 global.hidden.length', () => {
+  // 父目录 custom 藏 3、全局藏 2：子目录实际生效 3，不能显示 2
+  const view = clientPolicyView(
+    { global: { mode: 'custom', hidden: ['plugin:a', 'plugin:b'] }, workspaces: { 'd:/proj/api': { mode: 'follow' } } },
+    'd:/proj/api',
+    { source: 'workspace', effective: 3 },
+  );
+  assert.equal(view.inherited, 3, '必须用 effective，而不是全局条数');
+  assert.equal(view.inheritedFrom, 'workspace');
 });
 
 test('clientPolicyView：自定义模式不给继承提示（避免误导）', () => {
   const view = clientPolicyView(
     { global: { mode: 'custom', hidden: ['plugin:a'] }, workspaces: { 'd:/a': { mode: 'custom', hidden: [] } } },
     'd:/a',
+    { source: 'workspace', effective: 0 },
   );
   assert.equal(view.inherited, 0);
 });

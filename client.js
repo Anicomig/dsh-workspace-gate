@@ -74,6 +74,7 @@ window.__ModuleLoader__.load({
       modeCustom: '自定义',
       modeHint: '切换策略不会清空已保存的勾选',
       inherited: (n) => `继承自全局：已关 ${n} 组`,
+      inheritedFromParent: (n) => `继承自父工作区：已关 ${n} 组`,
       ownCount: (n) => `自定义 ${n} 组`,
       switchLabel: (name) => `切换 ${name} 的可见性`,
       descTools: '工具',
@@ -133,6 +134,7 @@ window.__ModuleLoader__.load({
       modeCustom: 'Custom',
       modeHint: 'Switching policy keeps your saved selections',
       inherited: (n) => `Inherited from global: ${n} groups off`,
+      inheritedFromParent: (n) => `Inherited from parent workspace: ${n} groups off`,
       ownCount: (n) => `Custom, ${n} groups off`,
       switchLabel: (name) => `Toggle ${name} visibility`,
       descTools: 'tools',
@@ -511,6 +513,13 @@ window.__ModuleLoader__.load({
           { value: 'all', label: t('modeAll') },
           { value: 'custom', label: t('modeCustom') },
         ];
+        // 继承条数取服务端算好的 effective（不用 global.hidden.length）：
+        // 子目录挂在一个 custom 父目录下时，实际生效的是父目录那份清单，
+        // 读全局条数会显示成错的数字。
+        const effectiveCount = isGlobal
+          ? ((snapshot.global && snapshot.global.hidden) || []).length
+          : (activeDir && activeDir.effective) || 0;
+        const inheritedFrom = !isGlobal && activeDir ? activeDir.source : 'none';
 
         // ── 工作区切换（一行 chip，选中态加深）
         const chipStyle = (selected) => ({
@@ -1102,9 +1111,15 @@ window.__ModuleLoader__.load({
                 ],
               ),
             ),
-            // 跟随全局且全局确实藏了东西时，告诉他继承了哪几组
-            !isGlobal && mode === 'follow' && globalHiddenCount
-              ? h('span', { key: 'inh', style: { fontSize: 11, color: T.muted } }, t('inherited', globalHiddenCount))
+            // 跟随全局且确实有生效清单时，告诉他继承了几组
+            !isGlobal && mode === 'follow' && effectiveCount
+              ? h(
+                  'span',
+                  { key: 'inh', style: { fontSize: 11, color: T.muted } },
+                  inheritedFrom === 'workspace'
+                    ? t('inheritedFromParent', effectiveCount)
+                    : t('inherited', effectiveCount),
+                )
               : null,
             locked ? h('span', { key: 'lock', style: { fontSize: 11, color: T.warn } }, t('modeHint')) : null,
           ]),

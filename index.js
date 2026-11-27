@@ -29,13 +29,12 @@ import {
   GLOBAL_MODES,
   normalizeDir,
   normalizeStore,
-  pickDir,
   resolveHidden,
   resolvePolicy,
   WORKSPACE_MODES,
+  clearGlobal,
   withAssignments,
   withGlobal,
-  withHidden,
   withWorkspace,
 } from './lib/policy.mjs';
 
@@ -601,6 +600,13 @@ export function apply(ctx) {
       if (!agent?.id) return;
       // agentCwd 只调一次：它的兜底路径要遍历 workspaceRegistry，不便宜。
       const cwd = agentCwd(ctx, agent);
+      // cwd 探测失败时保持 fail-open（与 agentCwd 自己的约定一致）：
+      // 空 cwd 会匹配不到任何工作区、落到全局分支，从而套用全局 custom 的全部拦截——
+      // 那个会话可能真实位于一个显式设成 all 的工作区，只因探测失败就被剥掉工具。
+      if (!cwd) {
+        bound.set(agent.id, { cwd: '', key: '', deny: [], sections: [], skipped: [], at: Date.now() });
+        return;
+      }
       const policy = resolvePolicy(store, cwd);
       if (!policy.hidden.length) {
         // 命中但没有要隐藏的（mode=all / 全局 all / 完全没配置）：
@@ -776,8 +782,11 @@ export function apply(ctx) {
     for (const dir of dirs.values()) {
       if (!dir.mode) dir.mode = 'follow';
       if (!Array.isArray(dir.hidden)) dir.hidden = [];
-      // effective = 该目录实际会隐藏多少条（UI 的「继承自全局」直接读它，不用自己算优先级）
-      dir.effective = resolvePolicy(store, dir.path).hidden.length;
+      // effective/source 都走 resolvePolicy：UI 直接读，不必自己再推一遍优先级，
+      // 也不会出现「显示继承 2 组、实际藏了 3 组」这种不一致。
+      const policy = resolvePolicy(store, dir.path);
+      dir.effective = policy.hidden.length;
+      dir.source = policy.source;
     }
 
     return {
@@ -855,6 +864,13 @@ export function apply(ctx) {
       if (tail === 'global') {
         if (req.method !== 'POST') return json(res, 405, { error: 'method_not_allowed' });
         const body = JSON.parse((await readBody(req)) || '{}');
+        // 删除全局段是破坏性操作，必须显式 clear:true。
+        // 不能靠「空 body」触发：模型调 action=global 想看一下就把配置清空了，很危险。
+        if (body?.clear === true) {
+          store = clearGlobal(store);
+          saveStore(store);
+          return json(res, 200, { ok: true, ...(await state(false)) });
+        }
         const patch = {};
         if (body?.mode !== undefined) {
           if (!GLOBAL_MODES.has(String(body.mode))) {
@@ -863,7 +879,9 @@ export function apply(ctx) {
           patch.mode = body.mode;
         }
         if (Array.isArray(body?.hidden)) patch.hidden = body.hidden;
-        // 空 patch = 删除全局段（回到「全部启用」）
+        if (!Object.keys(patch).length) {
+          return json(res, 400, { error: '需要 mode / hidden，或显式 clear:true' });
+        }
         store = withGlobal(store, patch);
         saveStore(store);
         return json(res, 200, { ok: true, ...(await state(false)) });
@@ -1029,6 +1047,13 @@ export function apply(ctx) {
         }
 
         if (action === 'global') {
+          // 删除全局段必须显式 clear:true。无参就删是数据丢失：
+          // 模型想「看一下全局配置」最自然的动作就是 action=global。
+          if (args?.clear === true) {
+            store = withGlobal(store, { mode: 'all', hidden: [] });
+            saveStore(store);
+            return safeJson({ ok: true, global: store.global ?? null });
+          }
           const patch = {};
           if (args?.mode !== undefined) {
             const mode = String(args.mode).trim();
@@ -1049,6 +1074,14 @@ export function apply(ctx) {
             touched = true;
           }
           if (touched) patch.hidden = [...prev];
+          if (!Object.keys(patch).length) {
+            // 什么都不写时返回当前的全局配置，而不是报错——「读」是最常见的意图
+            return safeJson({
+              ok: true,
+              global: store.global ?? { mode: 'all', hidden: [] },
+              note: '未做修改。要删除全局配置请传 clear:true。',
+            });
+          }
           store = withGlobal(store, patch);
           saveStore(store);
           return safeJson({ ok: true, global: store.global ?? null });
