@@ -30,6 +30,7 @@ import {
   normalizeStore,
   pickDir,
   resolveHidden,
+  resolvePolicy,
   withAssignments,
   withHidden,
 } from './lib/policy.mjs';
@@ -594,9 +595,15 @@ export function apply(ctx) {
   const bind = async (agent, carrier) => {
     try {
       if (!agent?.id) return;
+      // agentCwd 只调一次：它的兜底路径要遍历 workspaceRegistry，不便宜。
       const cwd = agentCwd(ctx, agent);
-      const key = pickDir(cwd, Object.keys(store.overrides));
-      if (!key) return;
+      const policy = resolvePolicy(store, cwd);
+      if (!policy.hidden.length) {
+        // 命中但没有要隐藏的（mode=all / 全局 all / 完全没配置）：
+        // 仍然记一条 bound，否则这类会话从 state().recent 和 status 的 recentSessions 里彻底消失。
+        bound.set(agent.id, { cwd, key: policy.key, deny: [], sections: [], skipped: [], at: Date.now() });
+        return;
+      }
 
       // 必须自己等清单：`apply()` 末尾那次 refreshPlugins 是 fire-and-forget，
       // 而 `agent/created` 几乎紧接着就来了。不 await 就会用空清单建计划，
@@ -609,7 +616,7 @@ export function apply(ctx) {
         await refreshPlugins(true);
       }
       const plan = await buildPlan();
-      const hidden = resolveHidden(store.overrides[key] ?? [], plan);
+      const hidden = resolveHidden(policy.hidden, plan);
       const visible = new Set([
         ...plan.groups.flatMap((g) => g.tools),
         ...plan.unassigned.tools,
@@ -620,11 +627,13 @@ export function apply(ctx) {
       if (!deny.length && !sections.length) {
         // 配了东西却一样都没隐藏成，是这个插件最危险的失败形态：用户以为生效了。
         // 议题 #1 就是这样静默过去的。三种原因要分开说，否则会把排查引向错误方向。
-        const specs = store.overrides[key] ?? [];
+        const specs = policy.hidden;
+        // source='global' 时 policy.key 是空串，直接印出工作区名会变成「工作区  配了」。
+        const where = policy.source === 'global' ? '全局策略' : `工作区 ${policy.key}`;
         if (specs.length) {
           if (!pluginList.length) {
             warn(
-              `工作区 ${key} 配了 ${specs.length} 条隐藏，但插件清单为空` +
+              `${where} 配了 ${specs.length} 条隐藏，但插件清单为空` +
                 `（读取失败或 pluginManager 不可用），本次未应用任何门控`,
             );
           } else {
@@ -634,14 +643,14 @@ export function apply(ctx) {
               return !known.has(spec.slice('plugin:'.length).toLowerCase());
             });
             warn(
-              `工作区 ${key} 配了 ${specs.length} 条隐藏，但没有一条命中可见面` +
+              `${where} 配了 ${specs.length} 条隐藏，但没有一条命中可见面` +
                 (missing.length
                   ? `；其中 ${missing.length} 条指向不存在的插件：${missing.join(', ')}`
                   : '；插件存在但它的工具/段落都不在可见面上'),
             );
           }
         }
-        bound.set(agent.id, { cwd, key, deny: [], sections: [], skipped: [], at: Date.now() });
+        bound.set(agent.id, { cwd, key: policy.key, deny: [], sections: [], skipped: [], at: Date.now() });
         return;
       }
 
@@ -692,7 +701,7 @@ export function apply(ctx) {
       });
 
       disposers.set(agent.id, off);
-      bound.set(agent.id, { cwd, key, deny: applied, sections, skipped, at: Date.now() });
+      bound.set(agent.id, { cwd, key: policy.key, deny: applied, sections, skipped, at: Date.now() });
       if (skipped.length) warn(`${skipped.length} 个名字无法门控（不在全局面）`);
     } catch (error) {
       warn(`绑定 agent 失败：${error?.message ?? error}`);
